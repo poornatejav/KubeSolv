@@ -1,364 +1,8 @@
-// package controller
-
-// import (
-// 	"context"
-// 	"fmt"
-// 	"io"
-// 	"math"
-// 	"strconv"
-// 	"strings"
-// 	"sync"
-// 	"time"
-
-// 	appsv1 "k8s.io/api/apps/v1"
-// 	corev1 "k8s.io/api/core/v1"
-// 	"k8s.io/apimachinery/pkg/api/resource"
-// 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-// 	"k8s.io/apimachinery/pkg/runtime"
-// 	"k8s.io/apimachinery/pkg/types"
-// 	"k8s.io/client-go/kubernetes"
-// 	ctrl "sigs.k8s.io/controller-runtime"
-// 	"sigs.k8s.io/controller-runtime/pkg/client"
-// 	"sigs.k8s.io/controller-runtime/pkg/handler"
-// 	"sigs.k8s.io/controller-runtime/pkg/log"
-// 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-// 	opsv1 "kubesolv/api/v1"
-// 	"kubesolv/internal/ai"
-// 	"kubesolv/internal/alert"
-// )
-
-// type KubeSolvConfigReconciler struct {
-// 	client.Client
-// 	Scheme        *runtime.Scheme
-// 	AI            *ai.Client
-// 	ClientSet     *kubernetes.Clientset
-// 	Telegram      *alert.TelegramBot
-// 	Slack         *alert.SlackBot
-// 	AnalysisCache sync.Map
-// }
-
-// // +kubebuilder:rbac:groups=ops.kubesolv.io,resources=kubesolvconfigs,verbs=get;list;watch;create;update;patch;delete
-// // +kubebuilder:rbac:groups=ops.kubesolv.io,resources=kubesolvconfigs/status,verbs=get;update;patch
-// // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
-// // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
-// // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;update;patch
-
-// func (r *KubeSolvConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-// 	var pod corev1.Pod
-// 	if err := r.Get(ctx, req.NamespacedName, &pod); err == nil {
-
-// 		// 1. Diagnose Crashes & OOMs
-// 		r.analyzePod(ctx, &pod)
-
-// 		// 2. Traffic Cop (Auto-Scaling)
-// 		// Only check scaling if the pod is healthy and running
-// 		if pod.Status.Phase == corev1.PodRunning {
-// 			r.checkActivity(ctx, &pod)
-// 		}
-// 	}
-// 	return ctrl.Result{}, nil
-// }
-
-// // --- HELPER: BROADCAST TO ALL CHANNELS ---
-// func (r *KubeSolvConfigReconciler) notifyUser(title, message string) {
-// 	// 1. Send to Telegram
-// 	if r.Telegram != nil {
-// 		r.Telegram.Broadcast("KubeSolv", "cluster", title, message)
-// 	}
-
-// 	// 2. Send to Slack
-// 	if r.Slack != nil {
-// 		err := r.Slack.Broadcast(title, message)
-// 		if err != nil {
-// 			fmt.Printf("❌ Failed to send Slack alert: %v\n", err)
-// 		}
-// 	}
-// }
-
-// // --- FEATURE 1: TRAFFIC COP (Horizontal Scaling) ---
-// func (r *KubeSolvConfigReconciler) checkActivity(ctx context.Context, pod *corev1.Pod) {
-// 	// Rate Limit: Check scaling only once every 15s per pod
-// 	cacheKey := fmt.Sprintf("scale/%s/%s", pod.Namespace, pod.Name)
-// 	if lastTime, ok := r.AnalysisCache.Load(cacheKey); ok {
-// 		if time.Since(lastTime.(time.Time)) < 15*time.Second {
-// 			return
-// 		}
-// 	}
-// 	r.AnalysisCache.Store(cacheKey, time.Now())
-
-// 	// Find Deployment
-// 	ownerRef := metav1.GetControllerOf(pod)
-// 	if ownerRef == nil || ownerRef.Kind != "ReplicaSet" {
-// 		return
-// 	}
-// 	var rs appsv1.ReplicaSet
-// 	if err := r.Get(ctx, types.NamespacedName{Name: ownerRef.Name, Namespace: pod.Namespace}, &rs); err != nil {
-// 		return
-// 	}
-// 	rsOwner := metav1.GetControllerOf(&rs)
-// 	if rsOwner == nil || rsOwner.Kind != "Deployment" {
-// 		return
-// 	}
-// 	var deploy appsv1.Deployment
-// 	if err := r.Get(ctx, types.NamespacedName{Name: rsOwner.Name, Namespace: pod.Namespace}, &deploy); err != nil {
-// 		return
-// 	}
-
-// 	// Read Min/Max from Annotations
-// 	minReplicas := int32(1)
-// 	maxReplicas := int32(10)
-// 	if val, ok := deploy.Annotations["kubesolv.io/min-replicas"]; ok {
-// 		if v, err := strconv.Atoi(val); err == nil {
-// 			minReplicas = int32(v)
-// 		}
-// 	}
-// 	if val, ok := deploy.Annotations["kubesolv.io/max-replicas"]; ok {
-// 		if v, err := strconv.Atoi(val); err == nil {
-// 			maxReplicas = int32(v)
-// 		}
-// 	}
-
-// 	// Analyze Traffic
-// 	logs, err := r.getRecentLogs(ctx, pod.Name, pod.Namespace)
-// 	if err != nil {
-// 		return
-// 	}
-
-// 	lines := len(strings.Split(logs, "\n"))
-// 	logsPerSec := float64(lines) / 5.0
-// 	currentReplicas := *deploy.Spec.Replicas
-
-// 	var desiredReplicas int32
-// 	reason := ""
-
-// 	if logsPerSec < 0.5 {
-// 		// Scale Down
-// 		if currentReplicas > minReplicas {
-// 			desiredReplicas = currentReplicas - 1
-// 			reason = fmt.Sprintf("📉 Traffic Dropped (%.1f logs/s). Scaling Down.", logsPerSec)
-// 		} else {
-// 			return
-// 		}
-// 	} else if logsPerSec > 10.0 {
-// 		// Scale Up
-// 		steps := int32(math.Ceil((logsPerSec - 10.0) / 10.0))
-// 		if steps > 2 {
-// 			steps = 2
-// 		}
-// 		if steps < 1 {
-// 			steps = 1
-// 		}
-
-// 		if currentReplicas < maxReplicas {
-// 			desiredReplicas = currentReplicas + steps
-// 			if desiredReplicas > maxReplicas {
-// 				desiredReplicas = maxReplicas
-// 			}
-// 			reason = fmt.Sprintf("🔥 High Load (%.1f logs/s). Scaling Up +%d.", logsPerSec, steps)
-// 		} else {
-// 			return
-// 		}
-// 	} else {
-// 		return
-// 	}
-
-// 	// Execute Scaling
-// 	if desiredReplicas != currentReplicas {
-// 		logger := log.FromContext(ctx)
-// 		logger.Info(fmt.Sprintf("⚖️ Smart Scaler: %s (%d -> %d)", reason, currentReplicas, desiredReplicas))
-
-// 		patch := []byte(fmt.Sprintf(`{"spec": {"replicas": %d}}`, desiredReplicas))
-// 		if err := r.Client.Patch(ctx, &deploy, client.RawPatch(types.MergePatchType, patch)); err == nil {
-// 			msg := fmt.Sprintf("📦 *App:* `%s`\n📊 *Traffic:* %.1f logs/sec\n🔄 *Adjustment:* %d ➡ %d\n📝 *Reason:* %s",
-// 				deploy.Name, logsPerSec, currentReplicas, desiredReplicas, reason)
-// 			r.notifyUser("Smart Scaling Triggered", msg)
-// 		}
-// 	}
-// }
-
-// // --- FEATURE 2: CRASH ANALYST (Diagnosis & Fixes) ---
-// func (r *KubeSolvConfigReconciler) analyzePod(ctx context.Context, pod *corev1.Pod) {
-// 	logger := log.FromContext(ctx)
-
-// 	for _, status := range pod.Status.ContainerStatuses {
-
-// 		// A. Check for OOMKilled
-// 		if status.LastTerminationState.Terminated != nil && status.LastTerminationState.Terminated.Reason == "OOMKilled" {
-// 			r.handleOOM(ctx, pod)
-// 			return
-// 		}
-
-// 		// B. Check for Waiting States
-// 		if status.State.Waiting != nil {
-// 			reason := status.State.Waiting.Reason
-
-// 			if reason == "ErrImagePull" || reason == "ImagePullBackOff" || reason == "CrashLoopBackOff" {
-
-// 				cacheKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-// 				if lastTime, ok := r.AnalysisCache.Load(cacheKey); ok {
-// 					if time.Since(lastTime.(time.Time)) < 2*time.Minute {
-// 						return
-// 					}
-// 				}
-// 				r.AnalysisCache.Store(cacheKey, time.Now())
-
-// 				logger.Info("🚨 Issue Detected", "pod", pod.Name, "reason", reason)
-
-// 				var logs string
-// 				if reason == "CrashLoopBackOff" {
-// 					logs, _ = r.getPodLogs(ctx, pod.Name, pod.Namespace, status.Name)
-// 				} else {
-// 					logs = fmt.Sprintf("Image Pull Error: %s", status.State.Waiting.Message)
-// 				}
-
-// 				analysis := "⚠️ **Diagnosis Unavailable**\nKubeSolv unable to get diagnosis.\n\n*Manual Check Required.*"
-// 				actionTaken := "No automated action taken."
-
-// 				if r.AI != nil {
-// 					aiResponse, err := r.AI.AnalyzeError(ctx, pod.Name, pod.Namespace, reason, logs)
-// 					if err == nil {
-// 						analysis = aiResponse
-// 						logger.Info("🧠 GEMINI: " + strings.ReplaceAll(analysis, "\n", " "))
-
-// 						if status.RestartCount > 2 || reason == "ImagePullBackOff" || reason == "ErrImagePull" {
-// 							result := r.attemptRestart(ctx, pod)
-// 							if result != "" {
-// 								actionTaken = result
-// 							}
-// 						}
-// 					} else {
-// 						logger.Error(err, "❌ Gemini failed")
-// 					}
-// 				}
-
-// 				finalReport := fmt.Sprintf("📦 *Pod:* `%s`\n📍 *Ns:* `%s`\n⚠️ *Issue:* %s\n\n%s\n\n🛠️ *Action Taken:*\n%s",
-// 					pod.Name, pod.Namespace, reason, analysis, actionTaken)
-
-// 				r.notifyUser(fmt.Sprintf("Issue Detected: %s", reason), finalReport)
-// 				logger.Info("📣 Alert sent to Channels")
-// 			}
-// 		}
-// 	}
-// }
-
-// // --- FEATURE 3: THE ARCHITECT (Vertical Memory Scaling) ---
-// func (r *KubeSolvConfigReconciler) handleOOM(ctx context.Context, pod *corev1.Pod) {
-// 	logger := log.FromContext(ctx)
-
-// 	cacheKey := fmt.Sprintf("oom/%s/%s", pod.Namespace, pod.Name)
-// 	if _, ok := r.AnalysisCache.Load(cacheKey); ok {
-// 		return
-// 	}
-// 	r.AnalysisCache.Store(cacheKey, time.Now())
-
-// 	logger.Info("🚨 OOMKilled Detected! Preparing to Scale Up...", "pod", pod.Name)
-
-// 	ownerRef := metav1.GetControllerOf(pod)
-// 	if ownerRef == nil || ownerRef.Kind != "ReplicaSet" {
-// 		return
-// 	}
-// 	var rs appsv1.ReplicaSet
-// 	if err := r.Get(ctx, types.NamespacedName{Name: ownerRef.Name, Namespace: pod.Namespace}, &rs); err != nil {
-// 		return
-// 	}
-// 	rsOwner := metav1.GetControllerOf(&rs)
-// 	if rsOwner == nil || rsOwner.Kind != "Deployment" {
-// 		return
-// 	}
-// 	var deploy appsv1.Deployment
-// 	if err := r.Get(ctx, types.NamespacedName{Name: rsOwner.Name, Namespace: pod.Namespace}, &deploy); err != nil {
-// 		return
-// 	}
-
-// 	newLimit := resource.MustParse("128Mi")
-// 	currentLimit := deploy.Spec.Template.Spec.Containers[0].Resources.Limits.Memory()
-// 	if !currentLimit.IsZero() {
-// 		newLimit = *currentLimit
-// 		newLimit.Add(*currentLimit)
-// 	}
-
-// 	patch := []byte(fmt.Sprintf(`{"spec": {"template": {"spec": {"containers": [{"name": "%s", "resources": {"limits": {"memory": "%s"}}}]}}}}`,
-// 		deploy.Spec.Template.Spec.Containers[0].Name, newLimit.String()))
-
-// 	if err := r.Client.Patch(ctx, &deploy, client.RawPatch(types.StrategicMergePatchType, patch)); err != nil {
-// 		logger.Error(err, "❌ Failed to scale memory")
-// 		return
-// 	}
-
-// 	msg := fmt.Sprintf("Pod `%s` ran out of memory.\n\n🛠️ *Action:* Increased memory limit to `%s`.",
-// 		pod.Name, newLimit.String())
-
-// 	r.notifyUser("Vertical Scaling Triggered", msg)
-// 	logger.Info("✅ Vertical Scaling Applied")
-// }
-
-// func (r *KubeSolvConfigReconciler) attemptRestart(ctx context.Context, pod *corev1.Pod) string {
-// 	logger := log.FromContext(ctx)
-// 	ownerRef := metav1.GetControllerOf(pod)
-// 	if ownerRef == nil || ownerRef.Kind != "ReplicaSet" {
-// 		return ""
-// 	}
-// 	var rs appsv1.ReplicaSet
-// 	if err := r.Get(ctx, types.NamespacedName{Name: ownerRef.Name, Namespace: pod.Namespace}, &rs); err != nil {
-// 		return ""
-// 	}
-// 	rsOwner := metav1.GetControllerOf(&rs)
-// 	if rsOwner == nil || rsOwner.Kind != "Deployment" {
-// 		return ""
-// 	}
-// 	var deploy appsv1.Deployment
-// 	if err := r.Get(ctx, types.NamespacedName{Name: rsOwner.Name, Namespace: pod.Namespace}, &deploy); err != nil {
-// 		return ""
-// 	}
-
-// 	patch := []byte(fmt.Sprintf(`{"spec": {"template": {"metadata": {"annotations": {"kubesolv.io/restartedAt": "%s"}}}}}`, time.Now().Format(time.RFC3339)))
-// 	if err := r.Client.Patch(ctx, &deploy, client.RawPatch(types.MergePatchType, patch)); err != nil {
-// 		logger.Error(err, "❌ Failed to restart")
-// 		return ""
-// 	}
-// 	logger.Info("✅ Restarted Deployment " + deploy.Name)
-// 	return fmt.Sprintf("🩹 Restarted Deployment `%s`.", deploy.Name)
-// }
-
-// // Helpers
-// func (r *KubeSolvConfigReconciler) getRecentLogs(ctx context.Context, name, namespace string) (string, error) {
-// 	opts := &corev1.PodLogOptions{SinceSeconds: func(i int64) *int64 { return &i }(5)}
-// 	req := r.ClientSet.CoreV1().Pods(namespace).GetLogs(name, opts)
-// 	logs, err := req.Stream(ctx)
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	defer logs.Close()
-// 	buf := new(strings.Builder)
-// 	_, err = io.Copy(buf, logs)
-// 	return buf.String(), err
-// }
-
-// func (r *KubeSolvConfigReconciler) getPodLogs(ctx context.Context, name, namespace, container string) (string, error) {
-// 	opts := &corev1.PodLogOptions{Container: container, TailLines: func(i int64) *int64 { return &i }(20)}
-// 	req := r.ClientSet.CoreV1().Pods(namespace).GetLogs(name, opts)
-// 	logs, err := req.Stream(ctx)
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	defer logs.Close()
-// 	buf := new(strings.Builder)
-// 	_, err = io.Copy(buf, logs)
-// 	return buf.String(), err
-// }
-
-// func (r *KubeSolvConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
-// 	return ctrl.NewControllerManagedBy(mgr).For(&opsv1.KubeSolvConfig{}).Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
-// 		return []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(o)}}
-// 	})).Complete(r)
-// }
-// -----------------------------------------------------
-
 package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -369,140 +13,147 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
 	opsv1 "kubesolv/api/v1"
 	"kubesolv/internal/ai"
 	"kubesolv/internal/alert"
+	"kubesolv/internal/metrics"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type KubeSolvConfigReconciler struct {
 	client.Client
-	Scheme    *runtime.Scheme
-	AI        *ai.Client
-	ClientSet *kubernetes.Clientset
-	Telegram  *alert.TelegramBot
-	Slack     *alert.SlackBot
-
-	// Cache for Rate Limiting Alerts (stores timestamps)
+	Scheme     *runtime.Scheme
+	AI         *ai.Client
+	ClientSet  *kubernetes.Clientset
+	Telegram   *alert.TelegramBot
+	Slack      *alert.SlackBot
+	Prometheus *metrics.PrometheusClient
 	AlertCache sync.Map
-	// Cache for Tracking State Changes (stores strings like "Running", "CrashLoop")
 	StateCache sync.Map
 }
 
-// +kubebuilder:rbac:groups=ops.kubesolv.io,resources=kubesolvconfigs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=ops.kubesolv.io,resources=kubesolvconfigs/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
-// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
-// +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;update;patch
-
 func (r *KubeSolvConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if req.Namespace == "kube-system" || req.Namespace == "local-path-storage" || req.Namespace == "ingress-nginx" || req.Namespace == "monitoring" {
+		return ctrl.Result{}, nil
+	}
+
 	var pod corev1.Pod
 	if err := r.Get(ctx, req.NamespacedName, &pod); err == nil {
-
-		// 1. Track Lifecycle (New Pods & Recovery)
 		r.trackLifecycle(ctx, &pod)
-
-		// 2. Diagnose Crashes & OOMs (The Doctor)
 		r.analyzePod(ctx, &pod)
-
-		// 3. Traffic Cop (Auto-Scaling)
+		r.checkSecurity(ctx, &pod)
 		if pod.Status.Phase == corev1.PodRunning {
 			r.checkActivity(ctx, &pod)
+			if r.Prometheus != nil {
+				r.checkPrometheusMetrics(ctx, &pod)
+				r.checkCostOptimization(ctx, &pod) // Trigger Cost Guardian
+			}
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 	}
 	return ctrl.Result{}, nil
 }
 
-// --- HELPER: BROADCAST (With Smart Deduplication) ---
 func (r *KubeSolvConfigReconciler) notifyUser(title, message string) {
-	// Create a hash of the message content
 	hash := fmt.Sprintf("%s-%d", title, len(message))
-
-	// Rate Limit Logic: 5 Minutes
 	if lastTime, ok := r.AlertCache.Load(hash); ok {
 		if time.Since(lastTime.(time.Time)) < 5*time.Minute {
-			// Check if this is a "Recovery" message. We NEVER silence recoveries!
 			if !strings.Contains(title, "Recovered") && !strings.Contains(title, "New Pod") {
-				return // Silence duplicate errors
+				return
 			}
 		}
 	}
 	r.AlertCache.Store(hash, time.Now())
 
-	// Send to Telegram
 	if r.Telegram != nil {
-		r.Telegram.Broadcast("KubeSolv", "cluster", title, message)
+		r.Telegram.Broadcast("cluster", title, message)
 	}
-
-	// Send to Slack
 	if r.Slack != nil {
-		err := r.Slack.Broadcast(title, message)
-		if err != nil {
-			fmt.Printf("❌ Failed to send Slack alert: %v\n", err)
-		}
+		_ = r.Slack.Broadcast(title, message)
 	}
 }
 
-// --- FEATURE 0: LIFECYCLE TRACKER (New! ✨) ---
 func (r *KubeSolvConfigReconciler) trackLifecycle(ctx context.Context, pod *corev1.Pod) {
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-
-	// Determine Current Status (Simplified)
-	currentStatus := string(pod.Status.Phase) // Default: Running, Pending, etc.
+	currentStatus := string(pod.Status.Phase)
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Waiting != nil {
-			currentStatus = cs.State.Waiting.Reason // e.g. CrashLoopBackOff
+			currentStatus = cs.State.Waiting.Reason
 		} else if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
 			currentStatus = "Error"
 		}
 	}
 
-	// Load Previous Status
 	lastStatusInterface, known := r.StateCache.Load(podKey)
 	lastStatus := ""
 	if known {
 		lastStatus = lastStatusInterface.(string)
 	}
 
-	// 1. Detect New Pod
 	if !known {
-		msg := fmt.Sprintf("📦 *New Pod Detected*\nName: `%s`\nNamespace: `%s`\nStatus: `%s`",
-			pod.Name, pod.Namespace, currentStatus)
+		msg := fmt.Sprintf("📦 *New Pod Detected*\nName: `%s`\nNamespace: `%s`\nStatus: `%s`", pod.Name, pod.Namespace, currentStatus)
 		r.notifyUser("🆕 New Activity", msg)
 		r.StateCache.Store(podKey, currentStatus)
 		return
 	}
 
-	// 2. Detect Recovery (Bad -> Good)
 	isBad := func(s string) bool {
-		return s == "CrashLoopBackOff" || s == "ImagePullBackOff" || s == "ErrImagePull" || s == "Error" || s == "OOMKilled"
+		return s == "CrashLoopBackOff" || s == "ImagePullBackOff" || s == "ErrImagePull" || s == "Error" || s == "OOMKilled" || s == "CreateContainerConfigError"
 	}
 
 	if isBad(lastStatus) && currentStatus == "Running" {
 		msg := fmt.Sprintf("✅ *Pod Recovered!*\nPod `%s` is now healthy and Running.", pod.Name)
 		r.notifyUser("✅ Issue Resolved", msg)
-
-		// Clear the Alert Cache for this pod so if it fails again, we alert immediately
-		r.AlertCache.Delete(fmt.Sprintf("Issue Detected: %s-%d", lastStatus, len(msg))) // Rough cleanup attempt
+		r.AlertCache.Delete(fmt.Sprintf("Issue Detected: %s-%d", lastStatus, len(msg)))
 	}
 
-	// Update Cache
 	if lastStatus != currentStatus {
 		r.StateCache.Store(podKey, currentStatus)
 	}
 }
 
-// --- FEATURE 1: TRAFFIC COP (Horizontal Scaling) ---
+func (r *KubeSolvConfigReconciler) checkSecurity(ctx context.Context, pod *corev1.Pod) {
+	cacheKey := fmt.Sprintf("sec/%s", pod.Namespace)
+	if lastTime, ok := r.AlertCache.Load(cacheKey); ok {
+		if time.Since(lastTime.(time.Time)) < 1*time.Hour {
+			return
+		}
+	}
+
+	policies, err := r.ClientSet.NetworkingV1().NetworkPolicies(pod.Namespace).List(ctx, metav1.ListOptions{})
+	if err == nil && len(policies.Items) == 0 {
+		r.AlertCache.Store(cacheKey, time.Now())
+
+		policy := &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "kubesolv-default-deny",
+				Namespace: pod.Namespace,
+			},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{},
+				PolicyTypes: []networkingv1.PolicyType{
+					networkingv1.PolicyTypeIngress,
+					networkingv1.PolicyTypeEgress,
+				},
+			},
+		}
+
+		_, err := r.ClientSet.NetworkingV1().NetworkPolicies(pod.Namespace).Create(ctx, policy, metav1.CreateOptions{})
+		if err == nil {
+			r.notifyUser("🛡️ Security Auto-Heal", fmt.Sprintf("No NetworkPolicy found in namespace `%s`. Autonomously applied a default-deny policy to secure the perimeter.", pod.Namespace))
+		}
+	}
+}
+
 func (r *KubeSolvConfigReconciler) checkActivity(ctx context.Context, pod *corev1.Pod) {
 	cacheKey := fmt.Sprintf("scale/%s/%s", pod.Namespace, pod.Name)
 	if lastTime, ok := r.AlertCache.Load(cacheKey); ok {
@@ -593,10 +244,7 @@ func (r *KubeSolvConfigReconciler) checkActivity(ctx context.Context, pod *corev
 	}
 }
 
-// --- FEATURE 2: CRASH ANALYST (Diagnosis & Fixes) ---
 func (r *KubeSolvConfigReconciler) analyzePod(ctx context.Context, pod *corev1.Pod) {
-	logger := log.FromContext(ctx)
-
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.LastTerminationState.Terminated != nil && status.LastTerminationState.Terminated.Reason == "OOMKilled" {
 			r.handleOOM(ctx, pod)
@@ -606,59 +254,77 @@ func (r *KubeSolvConfigReconciler) analyzePod(ctx context.Context, pod *corev1.P
 		if status.State.Waiting != nil {
 			reason := status.State.Waiting.Reason
 
-			if reason == "ErrImagePull" || reason == "ImagePullBackOff" || reason == "CrashLoopBackOff" {
-
-				// ANALYSIS RATE LIMIT (Don't analyze same pod every second)
-				// We use a shorter cache here (1 min) just to prevent CPU burn,
-				// but rely on notifyUser for the 5-min alert silence.
+			if reason == "ErrImagePull" || reason == "ImagePullBackOff" || reason == "CrashLoopBackOff" || reason == "CreateContainerConfigError" {
 				cacheKey := fmt.Sprintf("analyze/%s/%s", pod.Namespace, pod.Name)
 				if lastTime, ok := r.AlertCache.Load(cacheKey); ok {
-					if time.Since(lastTime.(time.Time)) < 1*time.Minute {
+					if time.Since(lastTime.(time.Time)) < 2*time.Minute {
 						return
 					}
 				}
 				r.AlertCache.Store(cacheKey, time.Now())
 
-				logger.Info("🚨 Issue Detected", "pod", pod.Name, "reason", reason)
-
 				var logs string
 				if reason == "CrashLoopBackOff" {
 					logs, _ = r.getPodLogs(ctx, pod.Name, pod.Namespace, status.Name)
-				} else {
-					logs = fmt.Sprintf("Image Pull Error: %s", status.State.Waiting.Message)
 				}
 
-				analysis := "⚠️ **Diagnosis Unavailable**\nKubeSolv unable to get diagnosis.\n\n*Manual Check Required.*"
-				actionTaken := "No automated action taken."
-
-				if r.AI != nil {
-					aiResponse, err := r.AI.AnalyzeError(ctx, pod.Name, pod.Namespace, reason, logs)
+				if r.AI != nil && reason != "ImagePullBackOff" && reason != "ErrImagePull" {
+					decision, err := r.AI.EvaluateIncident(ctx, reason, pod.Name, pod.Namespace, status.State.Waiting.Message, logs)
 					if err == nil {
-						analysis = aiResponse
 
-						if status.RestartCount > 2 || reason == "ImagePullBackOff" || reason == "ErrImagePull" {
-							result := r.attemptRestart(ctx, pod)
-							if result != "" {
-								actionTaken = result
+						if decision.ShouldAutoFix {
+							actionMsg := ""
+
+							if decision.Action == "rollback" {
+								ownerRef := metav1.GetControllerOf(pod)
+								if ownerRef != nil && ownerRef.Kind == "ReplicaSet" {
+									rs, _ := r.ClientSet.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, ownerRef.Name, metav1.GetOptions{})
+									rsOwner := metav1.GetControllerOf(rs)
+									if rsOwner != nil && rsOwner.Kind == "Deployment" {
+										if err := r.rollbackDeployment(ctx, pod.Namespace, rsOwner.Name); err == nil {
+											actionMsg = fmt.Sprintf("🤖 *Auto-Healed:* Successfully rolled back `%s` to previous stable version (Confidence: %d%%).", rsOwner.Name, decision.Confidence)
+										} else {
+											actionMsg = fmt.Sprintf("🤖 *Auto-Heal Failed:* Tried to rollback `%s` but encountered error: %v", rsOwner.Name, err)
+										}
+									}
+								}
+							}
+
+							if actionMsg != "" {
+								r.notifyUser("✅ Autonomous Action", actionMsg)
+								return
 							}
 						}
+
+						msg := fmt.Sprintf("⚠️ *Issue:* %s\n🤖 *AI Analysis:* %s\nConfidence: %d%%", reason, decision.Reason, decision.Confidence)
+
+						if reason == "CrashLoopBackOff" && status.RestartCount >= 2 {
+							ownerRef := metav1.GetControllerOf(pod)
+							if ownerRef != nil && ownerRef.Kind == "ReplicaSet" {
+								rs, _ := r.ClientSet.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, ownerRef.Name, metav1.GetOptions{})
+								rsOwner := metav1.GetControllerOf(rs)
+								if rsOwner != nil && rsOwner.Kind == "Deployment" {
+									actionID := fmt.Sprintf("rollback|%s|%s", pod.Namespace, rsOwner.Name)
+									if r.Slack != nil {
+										r.Slack.BroadcastWithAction("Action Required", msg, actionID, "Approve Rollback")
+									}
+									if r.Telegram != nil {
+										r.Telegram.BroadcastWithAction("cluster", "Action Required", msg, actionID, "Approve Rollback")
+									}
+									return
+								}
+							}
+						}
+
+						r.notifyUser(fmt.Sprintf("Issue Detected: %s", reason), msg)
 					}
 				}
-
-				finalReport := fmt.Sprintf("📦 *Pod:* `%s`\n📍 *Ns:* `%s`\n⚠️ *Issue:* %s\n\n%s\n\n🛠️ *Action Taken:*\n%s",
-					pod.Name, pod.Namespace, reason, analysis, actionTaken)
-
-				// THIS CALL USES THE 5-MIN RATE LIMITER
-				r.notifyUser(fmt.Sprintf("Issue Detected: %s", reason), finalReport)
 			}
 		}
 	}
 }
 
-// --- FEATURE 3: THE ARCHITECT (Vertical Memory Scaling) ---
 func (r *KubeSolvConfigReconciler) handleOOM(ctx context.Context, pod *corev1.Pod) {
-	logger := log.FromContext(ctx)
-
 	cacheKey := fmt.Sprintf("oom/%s/%s", pod.Namespace, pod.Name)
 	if _, ok := r.AlertCache.Load(cacheKey); ok {
 		return
@@ -669,34 +335,45 @@ func (r *KubeSolvConfigReconciler) handleOOM(ctx context.Context, pod *corev1.Po
 	if ownerRef == nil || ownerRef.Kind != "ReplicaSet" {
 		return
 	}
-	var rs appsv1.ReplicaSet
-	if err := r.Get(ctx, types.NamespacedName{Name: ownerRef.Name, Namespace: pod.Namespace}, &rs); err != nil {
+	rs, err := r.ClientSet.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, ownerRef.Name, metav1.GetOptions{})
+	if err != nil {
 		return
 	}
-	rsOwner := metav1.GetControllerOf(&rs)
+	rsOwner := metav1.GetControllerOf(rs)
 	if rsOwner == nil || rsOwner.Kind != "Deployment" {
 		return
 	}
-	var deploy appsv1.Deployment
-	if err := r.Get(ctx, types.NamespacedName{Name: rsOwner.Name, Namespace: pod.Namespace}, &deploy); err != nil {
+	deploy, err := r.ClientSet.AppsV1().Deployments(pod.Namespace).Get(ctx, rsOwner.Name, metav1.GetOptions{})
+	if err != nil {
 		return
 	}
 
 	newLimit := resource.MustParse("128Mi")
+	containerName := deploy.Spec.Template.Spec.Containers[0].Name
 	currentLimit := deploy.Spec.Template.Spec.Containers[0].Resources.Limits.Memory()
 	if !currentLimit.IsZero() {
 		newLimit = *currentLimit
 		newLimit.Add(*currentLimit)
 	}
 
-	patch := []byte(fmt.Sprintf(`{"spec": {"template": {"spec": {"containers": [{"name": "%s", "resources": {"limits": {"memory": "%s"}}}]}}}}`,
-		deploy.Spec.Template.Spec.Containers[0].Name, newLimit.String()))
+	maxLimit := resource.MustParse("1Gi")
+	if newLimit.Cmp(maxLimit) > 0 {
+		r.notifyUser("Guardrail Blocked Scaling", fmt.Sprintf("Pod %s hit the max memory guardrail (1Gi).", pod.Name))
+		return
+	}
 
-	if err := r.Client.Patch(ctx, &deploy, client.RawPatch(types.StrategicMergePatchType, patch)); err == nil {
-		msg := fmt.Sprintf("Pod `%s` ran out of memory.\n\n🛠️ *Action:* Increased memory limit to `%s`.",
-			pod.Name, newLimit.String())
-		r.notifyUser("Vertical Scaling Triggered", msg)
-		logger.Info("✅ Vertical Scaling Applied")
+	msg := fmt.Sprintf("Pod %s ran out of memory. Current limit is insufficient.", pod.Name)
+	actionID := fmt.Sprintf("patch_mem|%s|%s|%s|%s", pod.Namespace, deploy.Name, containerName, newLimit.String())
+	buttonText := fmt.Sprintf("Approve %s Bump", newLimit.String())
+
+	if r.Slack != nil {
+		_ = r.Slack.BroadcastWithAction("Vertical Scaling Required", msg, actionID, buttonText)
+	}
+	if r.Telegram != nil {
+		r.Telegram.BroadcastWithAction("cluster", "Vertical Scaling Required", msg, actionID, buttonText)
+	}
+	if r.Slack == nil && r.Telegram == nil {
+		r.notifyUser("Vertical Scaling Required", msg+fmt.Sprintf("\n\nAction Required: Increase memory to %s manually.", newLimit.String()))
 	}
 }
 
@@ -725,7 +402,6 @@ func (r *KubeSolvConfigReconciler) attemptRestart(ctx context.Context, pod *core
 	return ""
 }
 
-// Helpers
 func (r *KubeSolvConfigReconciler) getRecentLogs(ctx context.Context, name, namespace string) (string, error) {
 	opts := &corev1.PodLogOptions{SinceSeconds: func(i int64) *int64 { return &i }(5)}
 	req := r.ClientSet.CoreV1().Pods(namespace).GetLogs(name, opts)
@@ -756,4 +432,138 @@ func (r *KubeSolvConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).For(&opsv1.KubeSolvConfig{}).Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
 		return []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(o)}}
 	})).Complete(r)
+}
+
+func (r *KubeSolvConfigReconciler) checkPrometheusMetrics(ctx context.Context, pod *corev1.Pod) {
+	cacheKey := fmt.Sprintf("metrics/%s/%s", pod.Namespace, pod.Name)
+	if lastTime, ok := r.AlertCache.Load(cacheKey); ok {
+		if time.Since(lastTime.(time.Time)) < 5*time.Minute {
+			return
+		}
+	}
+
+	cpu, err := r.Prometheus.GetCPUUsage(ctx, pod.Namespace, pod.Name)
+	if err == nil && cpu > 0.90 {
+		r.AlertCache.Store(cacheKey, time.Now())
+		r.notifyUser("High CPU Usage Detected", fmt.Sprintf("Pod `%s` is using %.2f CPU cores. Consider horizontal scaling.", pod.Name, cpu))
+	}
+
+	mem, err := r.Prometheus.GetMemoryUsage(ctx, pod.Namespace, pod.Name)
+	if err == nil && mem > 800 {
+		r.AlertCache.Store(cacheKey, time.Now())
+		r.notifyUser("High Memory Usage Detected", fmt.Sprintf("Pod `%s` is using %.2f MB of memory. Nearing OOM limits.", pod.Name, mem))
+	}
+}
+
+func (r *KubeSolvConfigReconciler) rollbackDeployment(ctx context.Context, namespace, deployName string) error {
+	deploy, err := r.ClientSet.AppsV1().Deployments(namespace).Get(ctx, deployName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	rsList, err := r.ClientSet.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: metav1.FormatLabelSelector(deploy.Spec.Selector),
+	})
+	if err != nil || len(rsList.Items) < 2 {
+		return fmt.Errorf("not enough history to rollback")
+	}
+
+	var prevRS *appsv1.ReplicaSet
+	for i := range rsList.Items {
+		rs := &rsList.Items[i]
+		if rs.Annotations["deployment.kubernetes.io/revision"] != deploy.Annotations["deployment.kubernetes.io/revision"] {
+			if prevRS == nil || rs.CreationTimestamp.After(prevRS.CreationTimestamp.Time) {
+				prevRS = rs
+			}
+		}
+	}
+
+	if prevRS == nil {
+		return fmt.Errorf("previous replica set not found")
+	}
+
+	// Create a deep copy of the template so we can modify it safely
+	cleanTemplate := prevRS.Spec.Template.DeepCopy()
+	// Strip the system-generated hash so K8s handles the rollout scale-down cleanly
+	delete(cleanTemplate.Labels, "pod-template-hash")
+
+	patchBytes, _ := json.Marshal(map[string]interface{}{
+		"spec": map[string]interface{}{
+			"template": cleanTemplate,
+		},
+	})
+
+	_, err = r.ClientSet.AppsV1().Deployments(namespace).Patch(ctx, deployName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	return err
+}
+
+func (r *KubeSolvConfigReconciler) checkCostOptimization(ctx context.Context, pod *corev1.Pod) {
+	if r.Prometheus == nil || r.AI == nil {
+		return
+	}
+
+	ownerRef := metav1.GetControllerOf(pod)
+	if ownerRef == nil || ownerRef.Kind != "ReplicaSet" {
+		return
+	}
+
+	rs, err := r.ClientSet.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, ownerRef.Name, metav1.GetOptions{})
+	if err != nil {
+		return
+	}
+
+	rsOwner := metav1.GetControllerOf(rs)
+	if rsOwner == nil || rsOwner.Kind != "Deployment" {
+		return
+	}
+
+	cacheKey := fmt.Sprintf("cost/%s/%s", pod.Namespace, rsOwner.Name)
+	if lastTime, ok := r.AlertCache.Load(cacheKey); ok {
+		if time.Since(lastTime.(time.Time)) < 24*time.Hour {
+			return
+		}
+	}
+
+	cpuUsage, err := r.Prometheus.GetCPUUsage(ctx, pod.Namespace, pod.Name)
+	if err != nil {
+		return
+	}
+
+	memUsage, err := r.Prometheus.GetMemoryUsage(ctx, pod.Namespace, pod.Name)
+	if err != nil {
+		return
+	}
+
+	deploy, err := r.ClientSet.AppsV1().Deployments(pod.Namespace).Get(ctx, rsOwner.Name, metav1.GetOptions{})
+	if err != nil {
+		return
+	}
+
+	// Prevent premature evaluation: Wait 15 minutes after deployment creation
+	if time.Since(deploy.CreationTimestamp.Time) < 2*time.Minute {
+		return
+	}
+
+	replicas := *deploy.Spec.Replicas
+
+	// Only trigger AI analysis if running multiple replicas
+	if replicas > 1 {
+		decision, err := r.AI.AnalyzeCostOptimization(ctx, pod.Namespace, deploy.Name, replicas, cpuUsage, memUsage)
+		if err != nil || !decision.Optimize || decision.RecommendedReplicas >= replicas {
+			return
+		}
+
+		r.AlertCache.Store(cacheKey, time.Now())
+
+		msg := fmt.Sprintf("💰 *AI Cost Optimizer*\n%s\n\n📊 *Current:* %d replicas\n📉 *Suggested:* %d replicas", decision.Reason, replicas, decision.RecommendedReplicas)
+		actionID := fmt.Sprintf("scale|%s|%s|%d", pod.Namespace, deploy.Name, decision.RecommendedReplicas)
+		buttonText := fmt.Sprintf("Scale Down to %d", decision.RecommendedReplicas)
+
+		if r.Slack != nil {
+			r.Slack.BroadcastWithAction("Cost Optimization Opportunity", msg, actionID, buttonText)
+		}
+		if r.Telegram != nil {
+			r.Telegram.BroadcastWithAction("cluster", "Cost Optimization Opportunity", msg, actionID, buttonText)
+		}
+	}
 }

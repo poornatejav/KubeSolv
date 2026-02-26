@@ -253,3 +253,13 @@ endef
 define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
+
+.PHONY: setup-cluster
+setup-cluster:
+	@echo "Installing Prometheus..."
+	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+	helm repo update
+	helm upgrade --install prometheus prometheus-community/prometheus -n monitoring --create-namespace
+	@echo "Waiting for Prometheus to be ready..."
+	kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=prometheus -n monitoring --timeout=300s
+	@echo "Cluster setup complete!"

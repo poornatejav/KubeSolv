@@ -1,112 +1,154 @@
 // package alert
 
 // import (
-// 	"bytes"
-// 	"encoding/json"
+// 	"context"
 // 	"fmt"
-// 	"net/http"
+// 	"strings"
 // 	"sync"
-// 	"time"
+
+// 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+// 	"kubesolv/internal/ops"
 // )
 
 // type TelegramBot struct {
-// 	Token       string
-// 	Subscribers map[string]bool
-// 	mu          sync.RWMutex
+// 	Bot           *tgbotapi.BotAPI
+// 	ChatID        int64
+// 	Ops           *ops.OpsManager
+// 	mu            sync.RWMutex
+// 	Subscriptions map[int64]map[string]bool
 // }
 
-// func NewTelegramBot(token string) *TelegramBot {
+// func NewTelegramBot(token string, chatID int64, opsManager *ops.OpsManager) *TelegramBot {
+// 	bot, err := tgbotapi.NewBotAPI(token)
+// 	if err != nil {
+// 		return nil
+// 	}
+
+// 	subs := make(map[int64]map[string]bool)
+// 	if chatID != 0 {
+// 		subs[chatID] = map[string]bool{"cluster": true}
+// 	}
+
 // 	return &TelegramBot{
-// 		Token:       token,
-// 		Subscribers: make(map[string]bool),
+// 		Bot:           bot,
+// 		ChatID:        chatID,
+// 		Ops:           opsManager,
+// 		Subscriptions: subs,
 // 	}
 // }
 
-// func (t *TelegramBot) Listen() {
-// 	offset := 0
-// 	fmt.Println("🎧 KubeSolv is listening (Conversational Mode)...")
+// func (t *TelegramBot) Start() {
+// 	u := tgbotapi.NewUpdate(0)
+// 	u.Timeout = 60
+// 	updates := t.Bot.GetUpdatesChan(u)
 
-// 	for {
-// 		url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=10", t.Token, offset)
-// 		resp, err := http.Get(url)
-// 		if err != nil {
-// 			time.Sleep(3 * time.Second)
-// 			continue
-// 		}
-
-// 		var update Response
-// 		if err := json.NewDecoder(resp.Body).Decode(&update); err == nil && update.Ok {
-// 			for _, result := range update.Result {
-// 				offset = result.UpdateID + 1
-
-// 				chatID := fmt.Sprintf("%d", result.Message.Chat.ID)
-// 				text := result.Message.Text
-// 				username := result.Message.Chat.Username
-
-// 				// --- NEW LOGIC: Conversational ---
-
-// 				// 1. Check if they are new
-// 				t.mu.Lock()
-// 				isNew := !t.Subscribers[chatID]
-// 				t.Subscribers[chatID] = true // Always subscribe them
-// 				t.mu.Unlock()
-
-// 				if isNew {
-// 					fmt.Printf("👤 New Connection: %s says '%s'\n", username, text)
-// 					t.SendOne(chatID, "👋 **Connected!**\nI've linked you to the cluster logs.\nI will ping you immediately if any pod crashes.")
-// 				} else {
-// 					// 2. Reply to existing users (Basic Chat)
-// 					fmt.Printf("💬 Chat from %s: %s\n", username, text)
-// 					t.SendOne(chatID, "✅ **System Nominal.**\nI am watching your pods. No active crashes detected right now.")
+// 	go func() {
+// 		for update := range updates {
+// 			if update.Message != nil {
+// 				if t.ChatID == 0 {
+// 					t.ChatID = update.Message.Chat.ID
+// 					t.mu.Lock()
+// 					t.Subscriptions[t.ChatID] = map[string]bool{"cluster": true}
+// 					t.mu.Unlock()
+// 					t.send(t.ChatID, "👋 *KubeSolv Connected!* I'm listening. Try asking 'status' or 'events'.")
 // 				}
+
+// 				t.routeMessage(update.Message.Chat.ID, update.Message.Text)
+// 			} else if update.CallbackQuery != nil {
+// 				t.handleInteraction(update.CallbackQuery)
 // 			}
 // 		}
-// 		resp.Body.Close()
-// 	}
+// 	}()
 // }
 
-// func (t *TelegramBot) Broadcast(pod, namespace, reason, diagnosis string) {
+// func (t *TelegramBot) BroadcastWithAction(topic, title, message, actionID, buttonText string) {
 // 	t.mu.RLock()
 // 	defer t.mu.RUnlock()
 
-// 	if len(t.Subscribers) == 0 {
-// 		fmt.Println("⚠️ Alert generated, but nobody is connected via Telegram.")
+// 	for chatID, subs := range t.Subscriptions {
+// 		if subs["cluster"] || subs[topic] {
+// 			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("🚨 *%s*\n%s", title, message))
+// 			msg.ParseMode = "Markdown"
+
+// 			btn := tgbotapi.NewInlineKeyboardButtonData(buttonText, actionID)
+// 			msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(btn))
+
+// 			t.Bot.Send(msg)
+// 		}
+// 	}
+// }
+
+// func (t *TelegramBot) handleInteraction(query *tgbotapi.CallbackQuery) {
+// 	parts := strings.Split(query.Data, "|")
+// 	chatID := query.Message.Chat.ID
+
+// 	if len(parts) == 5 && parts[0] == "patch_mem" {
+// 		namespace, deployName, containerName, newLimit := parts[1], parts[2], parts[3], parts[4]
+// 		if err := t.Ops.PatchMemoryLimit(namespace, deployName, containerName, newLimit); err == nil {
+// 			msg := fmt.Sprintf("✅ Approved: Increased memory to %s for %s.", newLimit, deployName)
+// 			t.send(chatID, msg)
+// 			CrossPlatformSync <- "Telegram User Approved: Patch Memory for " + deployName
+// 		}
+// 	} else if len(parts) == 3 && parts[0] == "rollback" {
+// 		namespace, deployName := parts[1], parts[2]
+// 		if err := t.Ops.RollbackDeployment(namespace, deployName); err == nil {
+// 			msg := fmt.Sprintf("⏪ Approved: Initiated Rollback for %s.", deployName)
+// 			t.send(chatID, msg)
+// 			CrossPlatformSync <- "Telegram User Approved: Rollback for " + deployName
+// 		}
+// 	} else if len(parts) == 2 && parts[0] == "cordon_node" {
+// 		nodeName := parts[1]
+// 		if err := t.Ops.CordonNode(context.Background(), nodeName); err == nil {
+// 			msg := fmt.Sprintf("🚧 Approved: Node `%s` cordoned (marked unschedulable).", nodeName)
+// 			t.send(chatID, msg)
+// 			CrossPlatformSync <- "Telegram User Approved: Cordon Node " + nodeName
+// 		}
+// 	}
+
+// 	callback := tgbotapi.NewCallback(query.ID, "")
+// 	t.Bot.Request(callback)
+// }
+
+// func (t *TelegramBot) routeMessage(chatID int64, msg string) {
+// 	msg = strings.ToLower(msg)
+
+// 	if strings.Contains(msg, "hi") || strings.Contains(msg, "hello") || strings.Contains(msg, "help") || strings.Contains(msg, "start") {
+// 		t.send(chatID, "🤖 *I am KubeSolv.*\n\nYou can ask me things like:\n• \"status\"\n• \"metrics\"\n• \"events\"\n• \"logs <pod>\"")
+// 	} else if strings.Contains(msg, "status") {
+// 		t.send(chatID, t.Ops.GetHealthReport())
+// 	} else if strings.Contains(msg, "metrics") || strings.Contains(msg, "usage") {
+// 		t.send(chatID, t.Ops.GetResourceUsage())
+// 	} else if strings.Contains(msg, "events") {
+// 		t.send(chatID, t.Ops.GetRecentEvents())
+// 	} else if strings.HasPrefix(msg, "logs") {
+// 		parts := strings.Fields(msg)
+// 		if len(parts) > 1 {
+// 			t.send(chatID, t.Ops.GetLogs(parts[1]))
+// 		} else {
+// 			t.send(chatID, "⚠️ Usage: `logs <pod-name>`")
+// 		}
+// 	} else {
+// 		t.send(chatID, "🤔 I didn't catch that. Try asking for *status*, *metrics*, *events*, or *logs <pod>*.")
+// 	}
+// }
+
+// func (t *TelegramBot) Broadcast(source, namespace, reason, message string) {
+// 	if t.ChatID == 0 {
 // 		return
 // 	}
+// 	t.send(t.ChatID, fmt.Sprintf("🚨 *Alert: %s*\n\n%s", reason, message))
+// }
 
-// 	msg := fmt.Sprintf("🚨 *KubeSolv Alert*\n\n📦 *Pod:* `%s`\n📍 *Ns:* `%s`\n⚠️ *Issue:* %s\n\n🧠 *Diagnosis:*\n%s",
-// 		pod, namespace, reason, diagnosis)
-
-// 	for chatID := range t.Subscribers {
-// 		go t.SendOne(chatID, msg)
+// func (t *TelegramBot) send(chatID int64, text string) {
+// 	// Truncate to fix "Events not working" if the string is too long for Telegram
+// 	if len(text) > 4000 {
+// 		text = text[:4000] + "\n...[truncated]"
 // 	}
+// 	msg := tgbotapi.NewMessage(chatID, text)
+// 	_, _ = t.Bot.Send(msg)
 // }
 
-// func (t *TelegramBot) SendOne(chatID, text string) {
-// 	payload := map[string]string{"chat_id": chatID, "text": text, "parse_mode": "Markdown"}
-// 	data, _ := json.Marshal(payload)
-// 	http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.Token), "application/json", bytes.NewBuffer(data))
-// }
-
-// // --- API Structs ---
-// type Response struct {
-// 	Ok     bool     `json:"ok"`
-// 	Result []Update `json:"result"`
-// }
-// type Update struct {
-// 	UpdateID int     `json:"update_id"`
-// 	Message  Message `json:"message"`
-// }
-// type Message struct {
-// 	Text string `json:"text"`
-// 	Chat Chat   `json:"chat"`
-// }
-// type Chat struct {
-// 	ID       int64  `json:"id"`
-// 	Username string `json:"username"`
-// }
-
-//-----------------------------------------------------
+// ------------------------------
 
 package alert
 
@@ -116,212 +158,147 @@ import (
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	"kubesolv/internal/ai"
+	"kubesolv/internal/ops"
 )
 
 type TelegramBot struct {
-	Bot       *tgbotapi.BotAPI
-	ChatID    int64
-	ClientSet *kubernetes.Clientset
+	Bot    *tgbotapi.BotAPI
+	ChatID int64
+	Ops    *ops.OpsManager
+	AI     *ai.Client
 }
 
-func NewTelegramBot(token string, chatID int64, clientSet *kubernetes.Clientset) *TelegramBot {
+func NewTelegramBot(token string, chatID int64, opsManager *ops.OpsManager, aiClient *ai.Client) *TelegramBot {
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil
 	}
-	return &TelegramBot{Bot: bot, ChatID: chatID, ClientSet: clientSet}
+	return &TelegramBot{
+		Bot:    bot,
+		ChatID: chatID,
+		Ops:    opsManager,
+		AI:     aiClient,
+	}
 }
 
 func (t *TelegramBot) Start() {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
-
 	updates := t.Bot.GetUpdatesChan(u)
 
 	for update := range updates {
-		if update.Message == nil {
+		if update.CallbackQuery != nil {
+			t.handleInteraction(update.CallbackQuery)
 			continue
 		}
-
-		// Auto-detect ChatID on first contact
-		if t.ChatID == 0 {
-			t.ChatID = update.Message.Chat.ID
-			t.send("👋 KubeSolv Connected! I'm listening. Try asking 'How are my pods?'")
+		if update.Message != nil && update.Message.Text != "" {
+			t.routeMessage(update.Message.Chat.ID, update.Message.Text)
 		}
-
-		// --- NATURAL LANGUAGE ROUTER ---
-		msg := strings.ToLower(update.Message.Text)
-		t.routeMessage(msg)
 	}
 }
 
-func (t *TelegramBot) routeMessage(msg string) {
-	// 1. Status / Health Check
-	if strings.Contains(msg, "status") || strings.Contains(msg, "health") || strings.Contains(msg, "how are") || strings.Contains(msg, "overview") {
-		t.handleStatus()
+func (t *TelegramBot) routeMessage(chatID int64, msg string) {
+	if t.AI == nil {
+		t.send(chatID, "⚠️ AI Client not configured.")
 		return
 	}
 
-	// 2. Pod Listing / Debugging
-	if strings.Contains(msg, "pods") || strings.Contains(msg, "list") || strings.Contains(msg, "broken") || strings.Contains(msg, "crash") {
-		t.handleGetPods()
-		return
-	}
-
-	// 3. Greetings / Help
-	if strings.Contains(msg, "hi") || strings.Contains(msg, "hello") || strings.Contains(msg, "help") || strings.Contains(msg, "start") {
-		t.send("🤖 *I am KubeSolv.*\n\nYou can ask me things like:\n" +
-			"• \"How is the cluster status?\"\n" +
-			"• \"List all my pods\"\n" +
-			"• \"Show me broken apps\"\n" +
-			"• \"Health check\"")
-		return
-	}
-
-	// 4. Default Fallback
-	t.send("🤔 I didn't catch that. Try asking about *status* or *pods*.")
-}
-
-func (t *TelegramBot) handleStatus() {
-	if t.ClientSet == nil {
-		t.send("⚠️ No Cluster Access Configured.")
-		return
-	}
-
-	// Fetch ALL pods from ALL namespaces
-	pods, err := t.ClientSet.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
+	intent, err := t.AI.ProcessCommand(context.Background(), fmt.Sprintf("%d", chatID), msg)
 	if err != nil {
-		t.send(fmt.Sprintf("❌ Error fetching status: %v", err))
+		t.send(chatID, fmt.Sprintf("⚠️ Error analyzing request: %v", err))
 		return
 	}
 
-	// Counters for User Apps
-	uRun, uFail, uPend := 0, 0, 0
-	// Counters for System Infra
-	sRun, sFail, sPend := 0, 0, 0
-
-	for _, p := range pods.Items {
-		// Define what counts as "System"
-		// You can add more namespaces here if you have them (e.g., "monitoring")
-		isSystem := (p.Namespace == "kube-system" ||
-			p.Namespace == "local-path-storage" ||
-			p.Namespace == "ingress-nginx")
-
-		switch p.Status.Phase {
-		case "Running":
-			if isSystem {
-				sRun++
-			} else {
-				uRun++
-			}
-		case "Failed", "Unknown":
-			if isSystem {
-				sFail++
-			} else {
-				uFail++
-			}
-		case "Pending":
-			if isSystem {
-				sPend++
-			} else {
-				uPend++
-			}
+	switch intent.Action {
+	case "status":
+		t.send(chatID, t.Ops.GetHealthReport())
+	case "metrics":
+		t.send(chatID, t.Ops.GetResourceUsage())
+	case "events":
+		t.send(chatID, t.Ops.GetRecentEvents())
+	case "logs":
+		logs := t.Ops.GetLogs(intent.Target)
+		if logs == "" || strings.Contains(logs, "Error") {
+			t.send(chatID, fmt.Sprintf("❌ Could not fetch logs for `%s`.", intent.Target))
+			return
 		}
+		t.send(chatID, fmt.Sprintf("📜 *Logs for %s:*\n```\n%s\n```", intent.Target, logs))
+	case "scale":
+		err := t.Ops.ScaleDeployment(context.Background(), intent.Namespace, intent.Target, intent.Value)
+		if err != nil {
+			t.send(chatID, fmt.Sprintf("❌ Failed to scale: %v", err))
+			return
+		}
+		t.send(chatID, fmt.Sprintf("✅ Executed: Scaled `%s` to %s replicas.\n🤖 %s", intent.Target, intent.Value, intent.Reply))
+	default:
+		t.send(chatID, intent.Reply)
 	}
-
-	// Determine Health State
-	emoji := "🟢"
-	summaryText := "✨ *Cluster is Healthy*"
-
-	if uFail > 0 || uPend > 0 {
-		emoji = "⚠️"
-		summaryText = "🔥 *Your Apps need attention.*"
-	} else if sFail > 0 {
-		emoji = "🔧"
-		summaryText = "⚠️ *System Infrastructure is unstable.*"
-	}
-
-	// Format Message
-	msg := fmt.Sprintf("%s *Cluster Health Report*\n\n"+
-		"👤 *User Apps (Default)*\n"+
-		"✅ Running: *%d*\n"+
-		"❌ Failed: *%d*\n"+
-		"⏳ Pending: *%d*\n\n"+
-		"⚙️ *System Infra (Kube-System)*\n"+
-		"✅ Running: *%d*\n"+
-		"❌ Failed: *%d*\n"+
-		"⏳ Pending: *%d*\n\n"+
-		"%s",
-		emoji, uRun, uFail, uPend, sRun, sFail, sPend, summaryText)
-
-	t.send(msg)
 }
 
-func (t *TelegramBot) handleGetPods() {
-	if t.ClientSet == nil {
+func (t *TelegramBot) send(chatID int64, text string) {
+	if len(text) > 4000 {
+		text = text[:4000] + "\n...[truncated]"
+	}
+	msg := tgbotapi.NewMessage(chatID, text)
+	_, _ = t.Bot.Send(msg)
+}
+
+func (t *TelegramBot) Broadcast(category, title, message string) {
+	if t.ChatID != 0 {
+		t.send(t.ChatID, fmt.Sprintf("🚨 *%s*\n%s", title, message))
+	}
+}
+
+func (t *TelegramBot) BroadcastWithAction(category, title, message, actionID, buttonText string) {
+	if t.ChatID == 0 {
 		return
 	}
+	msg := tgbotapi.NewMessage(t.ChatID, fmt.Sprintf("🚨 *%s*\n%s", title, message))
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(buttonText, actionID),
+		),
+	)
+	_, _ = t.Bot.Send(msg)
+}
 
-	// Get ALL pods in default namespace
-	pods, err := t.ClientSet.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		t.send("❌ Error fetching pods.")
-		return
-	}
+func (t *TelegramBot) handleInteraction(query *tgbotapi.CallbackQuery) {
+	parts := strings.Split(query.Data, "|")
+	chatID := query.Message.Chat.ID
 
-	var sb strings.Builder
-	sb.WriteString("📦 *Pod Status (Default NS):*\n\n")
-
-	hasIssues := false
-	for _, p := range pods.Items {
-		icon := "🟢"
-		statusText := string(p.Status.Phase)
-
-		// Check container statuses for deeper issues (CrashLoop, ImagePull)
-		for _, cs := range p.Status.ContainerStatuses {
-			if cs.State.Waiting != nil {
-				icon = "🔴"
-				statusText = cs.State.Waiting.Reason // e.g., CrashLoopBackOff
-				hasIssues = true
-			} else if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
-				icon = "🔴"
-				statusText = "Error"
-				hasIssues = true
-			}
+	if len(parts) == 5 && parts[0] == "patch_mem" {
+		namespace, deployName, containerName, newLimit := parts[1], parts[2], parts[3], parts[4]
+		if err := t.Ops.PatchMemoryLimit(namespace, deployName, containerName, newLimit); err == nil {
+			msg := fmt.Sprintf("✅ Approved: Increased memory to %s for %s.", newLimit, deployName)
+			t.send(chatID, msg)
+			CrossPlatformSync <- "Telegram User Approved: Patch Memory for " + deployName
 		}
-
-		// Formatting: Bold the broken ones
-		if icon == "🔴" {
-			sb.WriteString(fmt.Sprintf("%s *%s*\n   └ _%s_\n", icon, p.Name, statusText))
+	} else if len(parts) == 3 && parts[0] == "rollback" {
+		namespace, deployName := parts[1], parts[2]
+		if err := t.Ops.RollbackDeployment(namespace, deployName); err == nil {
+			msg := fmt.Sprintf("⏪ Approved: Initiated Rollback for %s.", deployName)
+			t.send(chatID, msg)
+			CrossPlatformSync <- "Telegram User Approved: Rollback for " + deployName
+		}
+	} else if len(parts) == 2 && parts[0] == "cordon_node" {
+		nodeName := parts[1]
+		if err := t.Ops.CordonNode(context.Background(), nodeName); err == nil {
+			msg := fmt.Sprintf("🚧 Approved: Node `%s` cordoned (marked unschedulable).", nodeName)
+			t.send(chatID, msg)
+			CrossPlatformSync <- "Telegram User Approved: Cordon Node " + nodeName
+		}
+	} else if len(parts) == 4 && parts[0] == "scale" {
+		namespace, deployName, replicas := parts[1], parts[2], parts[3]
+		if err := t.Ops.ScaleDeployment(context.Background(), namespace, deployName, replicas); err == nil {
+			msg := fmt.Sprintf("✅ Executed: Scaled `%s` to %s replica(s) for cost optimization.", deployName, replicas)
+			t.send(chatID, msg)
+			CrossPlatformSync <- "Telegram User Approved: Scale " + deployName + " to " + replicas
 		} else {
-			sb.WriteString(fmt.Sprintf("%s %s\n", icon, p.Name))
+			t.send(chatID, fmt.Sprintf("❌ Failed to scale `%s`: %v", deployName, err))
 		}
 	}
 
-	if !hasIssues {
-		sb.WriteString("\n✨ All systems operational.")
-	}
-
-	t.send(sb.String())
-}
-
-// Broadcast is used by the Controller to push alerts
-func (t *TelegramBot) Broadcast(source, namespace, reason, message string) {
-	if t.ChatID == 0 {
-		return
-	}
-	// We ignore source/namespace args in the message body for cleaner alerts,
-	// relying on the formatted message passed in.
-	t.send(fmt.Sprintf("🚨 *Alert: %s*\n\n%s", reason, message))
-}
-
-func (t *TelegramBot) send(text string) {
-	if t.ChatID == 0 {
-		return
-	}
-	msg := tgbotapi.NewMessage(t.ChatID, text)
-	msg.ParseMode = "Markdown"
-	t.Bot.Send(msg)
+	callback := tgbotapi.NewCallback(query.ID, "")
+	t.Bot.Request(callback)
 }
