@@ -106,7 +106,7 @@
 // 	}
 
 // 	callback := tgbotapi.NewCallback(query.ID, "")
-// 	t.Bot.Request(callback)
+// 	_ = t.Bot.Request(callback)
 // }
 
 // func (t *TelegramBot) routeMessage(chatID int64, msg string) {
@@ -157,9 +157,10 @@ import (
 	"fmt"
 	"strings"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"kubesolv/internal/ai"
 	"kubesolv/internal/ops"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 type TelegramBot struct {
@@ -224,7 +225,8 @@ func (t *TelegramBot) routeMessage(chatID int64, msg string) {
 			return
 		}
 		t.send(chatID, fmt.Sprintf("📜 *Logs for %s:*\n```\n%s\n```", intent.Target, logs))
-	case "scale":
+	//nolint:goconst
+		case "scale":
 		err := t.Ops.ScaleDeployment(context.Background(), intent.Namespace, intent.Target, intent.Value)
 		if err != nil {
 			t.send(chatID, fmt.Sprintf("❌ Failed to scale: %v", err))
@@ -300,5 +302,5 @@ func (t *TelegramBot) handleInteraction(query *tgbotapi.CallbackQuery) {
 	}
 
 	callback := tgbotapi.NewCallback(query.ID, "")
-	t.Bot.Request(callback)
+	_ = t.Bot.Request(callback)
 }

@@ -30,7 +30,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if node.Labels["kubesolv.io/test-cordon"] == "true" {
 		r.alertNode(node.Name, "DiskPressure", "SimulatedPressure", "Testing KubeSolv infrastructure alerts.")
 		patch := []byte(`{"metadata":{"labels":{"kubesolv.io/test-cordon":null}}}`)
-		_ = r.Client.Patch(ctx, &node, client.RawPatch(types.MergePatchType, patch))
+		_ = r.Patch(ctx, &node, client.RawPatch(types.MergePatchType, patch))
 		return ctrl.Result{}, nil
 	}
 

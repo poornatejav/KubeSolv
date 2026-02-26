@@ -45,7 +45,7 @@
 // 	return "Could not generate analysis.", nil
 // }
 
-//-----------------------------
+// -----------------------------
 
 // internal/ai/gemini.go
 package ai

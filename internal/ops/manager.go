@@ -169,7 +169,7 @@ func (m *OpsManager) GetLogs(podName string) string {
 }
 
 func (m *OpsManager) PatchMemoryLimit(namespace, deployName, containerName, newLimit string) error {
-	patch := []byte(fmt.Sprintf(`{"spec": {"template": {"spec": {"containers": [{"name": "%s", "resources": {"limits": {"memory": "%s"}}}]}}}}`, containerName, newLimit))
+	patch := fmt.Appendf(nil, `{"spec": {"template": {"spec": {"containers": [{"name": "%s", "resources": {"limits": {"memory": "%s"}}}]}}}}`, containerName, newLimit)
 	_, err := m.KubeClient.AppsV1().Deployments(namespace).Patch(context.TODO(), deployName, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	return err
 }
@@ -177,7 +177,7 @@ func (m *OpsManager) PatchMemoryLimit(namespace, deployName, containerName, newL
 func (m *OpsManager) RollbackDeployment(namespace, deployName string) error {
 	// A simple rollback simulation: Annotate to force a re-evaluation/restart
 	// In a full production scenario, this queries ReplicaSets and restores the previous PodTemplateSpec.
-	patch := []byte(fmt.Sprintf(`{"spec": {"template": {"metadata": {"annotations": {"kubesolv.io/rollbackTriggeredAt": "%s"}}}}}`, time.Now().Format(time.RFC3339)))
+	patch := fmt.Appendf(nil, `{"spec": {"template": {"metadata": {"annotations": {"kubesolv.io/rollbackTriggeredAt": "%s"}}}}}`, time.Now().Format(time.RFC3339))
 	_, err := m.KubeClient.AppsV1().Deployments(namespace).Patch(context.TODO(), deployName, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	return err
 }

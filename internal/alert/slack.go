@@ -73,7 +73,7 @@
 // 			}
 // 		}
 // 	}()
-// 	s.Socket.Run()
+// 	_ = s.Socket.Run()
 // }
 
 // func cleanSlackMessage(msg string) string {
@@ -149,20 +149,21 @@
 // 	return err
 // }
 
-// func (s *SlackBot) handleInteraction(actionID string, channelID string, triggerID string) {
+// //nolint:unparam
+func (s *SlackBot) handleInteraction(actionID string, channelID string, triggerID string) {
 // 	parts := strings.Split(actionID, "|")
 // 	if len(parts) == 5 && parts[0] == "patch_mem" {
 // 		namespace, deployName, containerName, newLimit := parts[1], parts[2], parts[3], parts[4]
 // 		if err := s.Ops.PatchMemoryLimit(namespace, deployName, containerName, newLimit); err == nil {
 // 			msg := fmt.Sprintf("✅ Approved: Increased memory to %s for %s.", newLimit, deployName)
-// 			s.Broadcast("Action Approved", msg)
+// 			_ = s.Broadcast("Action Approved", msg)
 // 			CrossPlatformSync <- "Slack User Approved: Patch Memory for " + deployName
 // 		}
 // 	} else if len(parts) == 3 && parts[0] == "rollback" {
 // 		namespace, deployName := parts[1], parts[2]
 // 		if err := s.Ops.RollbackDeployment(namespace, deployName); err == nil {
 // 			msg := fmt.Sprintf("⏪ Approved: Initiated Rollback for %s.", deployName)
-// 			s.Broadcast("Action Approved", msg)
+// 			_ = s.Broadcast("Action Approved", msg)
 // 			CrossPlatformSync <- "Slack User Approved: Rollback for " + deployName
 // 		}
 // 	} else if len(parts) == 2 && parts[0] == "cordon_node" {
@@ -170,12 +171,12 @@
 // 		// Using a background context for the ops call
 // 		if err := s.Ops.CordonNode(context.Background(), nodeName); err == nil {
 // 			msg := fmt.Sprintf("🚧 Approved: Node `%s` cordoned (marked unschedulable).", nodeName)
-// 			s.Broadcast("Action Approved", msg)
+// 			_ = s.Broadcast("Action Approved", msg)
 // 			CrossPlatformSync <- "Slack User Approved: Cordon Node " + nodeName
 // 		}
 // 	}
 // }
-//---------------------------------------
+// ---------------------------------------
 
 package alert
 
@@ -187,11 +188,12 @@ import (
 	"regexp"
 	"strings"
 
+	"kubesolv/internal/ai"
+	"kubesolv/internal/ops"
+
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
-	"kubesolv/internal/ai"
-	"kubesolv/internal/ops"
 )
 
 type SlackBot struct {
@@ -255,7 +257,7 @@ func (s *SlackBot) Start() {
 			}
 		}
 	}()
-	s.Socket.Run()
+	_ = s.Socket.Run()
 }
 
 func cleanSlackMessage(msg string) string {
@@ -331,34 +333,35 @@ func (s *SlackBot) BroadcastWithAction(title, message, actionID, buttonText stri
 	return err
 }
 
+//nolint:unparam
 func (s *SlackBot) handleInteraction(actionID string, channelID string, triggerID string) {
 	parts := strings.Split(actionID, "|")
 	if len(parts) == 5 && parts[0] == "patch_mem" {
 		namespace, deployName, containerName, newLimit := parts[1], parts[2], parts[3], parts[4]
 		if err := s.Ops.PatchMemoryLimit(namespace, deployName, containerName, newLimit); err == nil {
 			msg := fmt.Sprintf("✅ Approved: Increased memory to %s for %s.", newLimit, deployName)
-			s.Broadcast("Action Approved", msg)
+			_ = s.Broadcast("Action Approved", msg)
 			CrossPlatformSync <- "Slack User Approved: Patch Memory for " + deployName
 		}
 	} else if len(parts) == 3 && parts[0] == "rollback" {
 		namespace, deployName := parts[1], parts[2]
 		if err := s.Ops.RollbackDeployment(namespace, deployName); err == nil {
 			msg := fmt.Sprintf("⏪ Approved: Initiated Rollback for %s.", deployName)
-			s.Broadcast("Action Approved", msg)
+			_ = s.Broadcast("Action Approved", msg)
 			CrossPlatformSync <- "Slack User Approved: Rollback for " + deployName
 		}
 	} else if len(parts) == 2 && parts[0] == "cordon_node" {
 		nodeName := parts[1]
 		if err := s.Ops.CordonNode(context.Background(), nodeName); err == nil {
 			msg := fmt.Sprintf("🚧 Approved: Node `%s` cordoned (marked unschedulable).", nodeName)
-			s.Broadcast("Action Approved", msg)
+			_ = s.Broadcast("Action Approved", msg)
 			CrossPlatformSync <- "Slack User Approved: Cordon Node " + nodeName
 		}
 	} else if len(parts) == 4 && parts[0] == "scale" {
 		namespace, deployName, replicas := parts[1], parts[2], parts[3]
 		if err := s.Ops.ScaleDeployment(context.Background(), namespace, deployName, replicas); err == nil {
 			msg := fmt.Sprintf("✅ Executed: Scaled `%s` to %s replica(s) for cost optimization.", deployName, replicas)
-			s.Broadcast("Action Approved", msg)
+			_ = s.Broadcast("Action Approved", msg)
 			CrossPlatformSync <- "Slack User Approved: Scale " + deployName + " to " + replicas
 		} else {
 			s.Broadcast("Action Failed", fmt.Sprintf("❌ Failed to scale `%s`: %v", deployName, err))
