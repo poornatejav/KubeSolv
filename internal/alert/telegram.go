@@ -1,155 +1,3 @@
-// package alert
-
-// import (
-// 	"context"
-// 	"fmt"
-// 	"strings"
-// 	"sync"
-
-// 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-// 	"kubesolv/internal/ops"
-// )
-
-// type TelegramBot struct {
-// 	Bot           *tgbotapi.BotAPI
-// 	ChatID        int64
-// 	Ops           *ops.OpsManager
-// 	mu            sync.RWMutex
-// 	Subscriptions map[int64]map[string]bool
-// }
-
-// func NewTelegramBot(token string, chatID int64, opsManager *ops.OpsManager) *TelegramBot {
-// 	bot, err := tgbotapi.NewBotAPI(token)
-// 	if err != nil {
-// 		return nil
-// 	}
-
-// 	subs := make(map[int64]map[string]bool)
-// 	if chatID != 0 {
-// 		subs[chatID] = map[string]bool{"cluster": true}
-// 	}
-
-// 	return &TelegramBot{
-// 		Bot:           bot,
-// 		ChatID:        chatID,
-// 		Ops:           opsManager,
-// 		Subscriptions: subs,
-// 	}
-// }
-
-// func (t *TelegramBot) Start() {
-// 	u := tgbotapi.NewUpdate(0)
-// 	u.Timeout = 60
-// 	updates := t.Bot.GetUpdatesChan(u)
-
-// 	go func() {
-// 		for update := range updates {
-// 			if update.Message != nil {
-// 				if t.ChatID == 0 {
-// 					t.ChatID = update.Message.Chat.ID
-// 					t.mu.Lock()
-// 					t.Subscriptions[t.ChatID] = map[string]bool{"cluster": true}
-// 					t.mu.Unlock()
-// 					t.send(t.ChatID, "👋 *KubeSolv Connected!* I'm listening. Try asking 'status' or 'events'.")
-// 				}
-
-// 				t.routeMessage(update.Message.Chat.ID, update.Message.Text)
-// 			} else if update.CallbackQuery != nil {
-// 				t.handleInteraction(update.CallbackQuery)
-// 			}
-// 		}
-// 	}()
-// }
-
-// func (t *TelegramBot) BroadcastWithAction(topic, title, message, actionID, buttonText string) {
-// 	t.mu.RLock()
-// 	defer t.mu.RUnlock()
-
-// 	for chatID, subs := range t.Subscriptions {
-// 		if subs["cluster"] || subs[topic] {
-// 			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("🚨 *%s*\n%s", title, message))
-// 			msg.ParseMode = "Markdown"
-
-// 			btn := tgbotapi.NewInlineKeyboardButtonData(buttonText, actionID)
-// 			msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(btn))
-
-// 			t.Bot.Send(msg)
-// 		}
-// 	}
-// }
-
-// func (t *TelegramBot) handleInteraction(query *tgbotapi.CallbackQuery) {
-// 	parts := strings.Split(query.Data, "|")
-// 	chatID := query.Message.Chat.ID
-
-// 	if len(parts) == 5 && parts[0] == "patch_mem" {
-// 		namespace, deployName, containerName, newLimit := parts[1], parts[2], parts[3], parts[4]
-// 		if err := t.Ops.PatchMemoryLimit(namespace, deployName, containerName, newLimit); err == nil {
-// 			msg := fmt.Sprintf("✅ Approved: Increased memory to %s for %s.", newLimit, deployName)
-// 			t.send(chatID, msg)
-// 			CrossPlatformSync <- "Telegram User Approved: Patch Memory for " + deployName
-// 		}
-// 	} else if len(parts) == 3 && parts[0] == "rollback" {
-// 		namespace, deployName := parts[1], parts[2]
-// 		if err := t.Ops.RollbackDeployment(namespace, deployName); err == nil {
-// 			msg := fmt.Sprintf("⏪ Approved: Initiated Rollback for %s.", deployName)
-// 			t.send(chatID, msg)
-// 			CrossPlatformSync <- "Telegram User Approved: Rollback for " + deployName
-// 		}
-// 	} else if len(parts) == 2 && parts[0] == "cordon_node" {
-// 		nodeName := parts[1]
-// 		if err := t.Ops.CordonNode(context.Background(), nodeName); err == nil {
-// 			msg := fmt.Sprintf("🚧 Approved: Node `%s` cordoned (marked unschedulable).", nodeName)
-// 			t.send(chatID, msg)
-// 			CrossPlatformSync <- "Telegram User Approved: Cordon Node " + nodeName
-// 		}
-// 	}
-
-// 	callback := tgbotapi.NewCallback(query.ID, "")
-// 	_ = t.Bot.Request(callback)
-// }
-
-// func (t *TelegramBot) routeMessage(chatID int64, msg string) {
-// 	msg = strings.ToLower(msg)
-
-// 	if strings.Contains(msg, "hi") || strings.Contains(msg, "hello") || strings.Contains(msg, "help") || strings.Contains(msg, "start") {
-// 		t.send(chatID, "🤖 *I am KubeSolv.*\n\nYou can ask me things like:\n• \"status\"\n• \"metrics\"\n• \"events\"\n• \"logs <pod>\"")
-// 	} else if strings.Contains(msg, "status") {
-// 		t.send(chatID, t.Ops.GetHealthReport())
-// 	} else if strings.Contains(msg, "metrics") || strings.Contains(msg, "usage") {
-// 		t.send(chatID, t.Ops.GetResourceUsage())
-// 	} else if strings.Contains(msg, "events") {
-// 		t.send(chatID, t.Ops.GetRecentEvents())
-// 	} else if strings.HasPrefix(msg, "logs") {
-// 		parts := strings.Fields(msg)
-// 		if len(parts) > 1 {
-// 			t.send(chatID, t.Ops.GetLogs(parts[1]))
-// 		} else {
-// 			t.send(chatID, "⚠️ Usage: `logs <pod-name>`")
-// 		}
-// 	} else {
-// 		t.send(chatID, "🤔 I didn't catch that. Try asking for *status*, *metrics*, *events*, or *logs <pod>*.")
-// 	}
-// }
-
-// func (t *TelegramBot) Broadcast(source, namespace, reason, message string) {
-// 	if t.ChatID == 0 {
-// 		return
-// 	}
-// 	t.send(t.ChatID, fmt.Sprintf("🚨 *Alert: %s*\n\n%s", reason, message))
-// }
-
-// func (t *TelegramBot) send(chatID int64, text string) {
-// 	// Truncate to fix "Events not working" if the string is too long for Telegram
-// 	if len(text) > 4000 {
-// 		text = text[:4000] + "\n...[truncated]"
-// 	}
-// 	msg := tgbotapi.NewMessage(chatID, text)
-// 	_, _ = t.Bot.Send(msg)
-// }
-
-// ------------------------------
-
 package alert
 
 import (
@@ -161,6 +9,7 @@ import (
 	"kubesolv/internal/ops"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/google/generative-ai-go/genai"
 )
 
 type TelegramBot struct {
@@ -205,36 +54,107 @@ func (t *TelegramBot) routeMessage(chatID int64, msg string) {
 		return
 	}
 
-	intent, err := t.AI.ProcessCommand(context.Background(), fmt.Sprintf("%d", chatID), msg)
-	if err != nil {
-		t.send(chatID, fmt.Sprintf("⚠️ Error analyzing request: %v", err))
-		return
-	}
+	ctx := context.Background()
+	resp, err := t.AI.SendChatMessage(ctx, fmt.Sprintf("%d", chatID), msg)
 
-	switch intent.Action {
-	case "status":
-		t.send(chatID, t.Ops.GetHealthReport())
-	case "metrics":
-		t.send(chatID, t.Ops.GetResourceUsage())
-	case "events":
-		t.send(chatID, t.Ops.GetRecentEvents())
-	case "logs":
-		logs := t.Ops.GetLogs(intent.Target)
-		if logs == "" || strings.Contains(logs, "Error") {
-			t.send(chatID, fmt.Sprintf("❌ Could not fetch logs for `%s`.", intent.Target))
-			return
-		}
-		t.send(chatID, fmt.Sprintf("📜 *Logs for %s:*\n```\n%s\n```", intent.Target, logs))
-	//nolint:goconst
-		case "scale":
-		err := t.Ops.ScaleDeployment(context.Background(), intent.Namespace, intent.Target, intent.Value)
+	for {
 		if err != nil {
-			t.send(chatID, fmt.Sprintf("❌ Failed to scale: %v", err))
+			t.send(chatID, fmt.Sprintf("⚠️ AI Error: %v", err))
 			return
 		}
-		t.send(chatID, fmt.Sprintf("✅ Executed: Scaled `%s` to %s replicas.\n🤖 %s", intent.Target, intent.Value, intent.Reply))
+
+		if len(resp.Candidates) == 0 {
+			t.send(chatID, "⚠️ AI returned an empty response.")
+			return
+		}
+
+		cand := resp.Candidates[0]
+		var replyText string
+		var toolCalls []genai.FunctionCall
+
+		for _, part := range cand.Content.Parts {
+			switch p := part.(type) {
+			case genai.Text:
+				replyText += string(p)
+			case genai.FunctionCall:
+				toolCalls = append(toolCalls, p)
+			}
+		}
+
+		if replyText != "" {
+			t.send(chatID, replyText)
+		}
+
+		if len(toolCalls) == 0 {
+			break
+		}
+
+		var toolResponses []*genai.FunctionResponse
+		for _, call := range toolCalls {
+			result := t.executeTool(ctx, chatID, call)
+			toolResponses = append(toolResponses, &genai.FunctionResponse{
+				Name: call.Name,
+				Response: map[string]any{
+					"result": result,
+				},
+			})
+		}
+
+		resp, err = t.AI.SendFunctionResponse(ctx, fmt.Sprintf("%d", chatID), toolResponses)
+	}
+}
+
+func (t *TelegramBot) executeTool(ctx context.Context, chatID int64, call genai.FunctionCall) any {
+	const approvalMsg = approvalMsg
+	switch call.Name {
+	case "get_health_report":
+		return t.Ops.GetHealthReport()
+	case "get_resource_usage":
+		return t.Ops.GetResourceUsage()
+	case "get_recent_events":
+		return t.Ops.GetRecentEvents()
+	case "get_pod_logs":
+		podName, _ := call.Args["pod_name"].(string)
+		return t.Ops.GetLogs(podName)
+	case "scale_deployment":
+		namespace, _ := call.Args["namespace"].(string)
+		deployName, _ := call.Args["deployment_name"].(string)
+		replicas, _ := call.Args["replicas"].(string)
+		actionID := fmt.Sprintf("scale|%s|%s|%s", namespace, deployName, replicas)
+		t.sendWithAction(chatID, "Action Required: Scale Deployment", fmt.Sprintf("AI proposes scaling `%s` in `%s` to `%s` replicas.", deployName, namespace, replicas), actionID, "Approve Scale")
+		return approvalMsg
+	case "list_pods":
+		namespace, _ := call.Args["namespace"].(string)
+		return t.Ops.ListPods(ctx, namespace)
+	case "get_pod_details":
+		namespace, _ := call.Args["namespace"].(string)
+		podName, _ := call.Args["pod_name"].(string)
+		return t.Ops.GetPodDetails(ctx, namespace, podName)
+	case "delete_pod":
+		namespace, _ := call.Args["namespace"].(string)
+		podName, _ := call.Args["pod_name"].(string)
+		actionID := fmt.Sprintf("del_pod|%s|%s", namespace, podName)
+		t.sendWithAction(chatID, "Action Required: Delete Pod", fmt.Sprintf("AI proposes to force-delete pod `%s` in `%s`.", podName, namespace), actionID, "Approve Delete")
+		return approvalMsg
+	case "restart_deployment":
+		namespace, _ := call.Args["namespace"].(string)
+		deployName, _ := call.Args["deployment_name"].(string)
+		actionID := fmt.Sprintf("restart_dep|%s|%s", namespace, deployName)
+		t.sendWithAction(chatID, "Action Required: Restart Deployment", fmt.Sprintf("AI proposes rollout restart for `%s` in `%s`.", deployName, namespace), actionID, "Approve Restart")
+		return approvalMsg
+	//nolint:goconst
+	case "cordon_node":
+		nodeName, _ := call.Args["node_name"].(string)
+		actionID := fmt.Sprintf("cordon|%s", nodeName)
+		t.sendWithAction(chatID, "Action Required: Cordon Node", fmt.Sprintf("AI proposes to cordon node `%s`.", nodeName), actionID, "Approve Cordon")
+		return approvalMsg
+	case "uncordon_node":
+		nodeName, _ := call.Args["node_name"].(string)
+		actionID := fmt.Sprintf("uncordon|%s", nodeName)
+		t.sendWithAction(chatID, "Action Required: Uncordon Node", fmt.Sprintf("AI proposes to uncordon node `%s`.", nodeName), actionID, "Approve Uncordon")
+		return approvalMsg
 	default:
-		t.send(chatID, intent.Reply)
+		return "Unknown tool called"
 	}
 }
 
@@ -265,6 +185,16 @@ func (t *TelegramBot) BroadcastWithAction(category, title, message, actionID, bu
 	_, _ = t.Bot.Send(msg)
 }
 
+func (t *TelegramBot) sendWithAction(chatID int64, title, message, actionID, buttonText string) {
+	msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("🚨 *%s*\n%s", title, message))
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(buttonText, actionID),
+		),
+	)
+	_, _ = t.Bot.Send(msg)
+}
+
 func (t *TelegramBot) handleInteraction(query *tgbotapi.CallbackQuery) {
 	parts := strings.Split(query.Data, "|")
 	chatID := query.Message.Chat.ID
@@ -272,35 +202,58 @@ func (t *TelegramBot) handleInteraction(query *tgbotapi.CallbackQuery) {
 	if len(parts) == 5 && parts[0] == "patch_mem" {
 		namespace, deployName, containerName, newLimit := parts[1], parts[2], parts[3], parts[4]
 		if err := t.Ops.PatchMemoryLimit(namespace, deployName, containerName, newLimit); err == nil {
-			msg := fmt.Sprintf("✅ Approved: Increased memory to %s for %s.", newLimit, deployName)
+			msg := fmt.Sprintf("✨ [Approved] Increased memory limit to `%s` for deployment `%s`.", newLimit, deployName)
 			t.send(chatID, msg)
 			CrossPlatformSync <- "Telegram User Approved: Patch Memory for " + deployName
 		}
 	} else if len(parts) == 3 && parts[0] == "rollback" {
 		namespace, deployName := parts[1], parts[2]
 		if err := t.Ops.RollbackDeployment(namespace, deployName); err == nil {
-			msg := fmt.Sprintf("⏪ Approved: Initiated Rollback for %s.", deployName)
-			t.send(chatID, msg)
+			t.send(chatID, fmt.Sprintf("🔄 [Approved] Initiated rollback sequence for deployment `%s`.", deployName))
 			CrossPlatformSync <- "Telegram User Approved: Rollback for " + deployName
 		}
-	} else if len(parts) == 2 && parts[0] == "cordon_node" {
+	} else if len(parts) == 2 && parts[0] == "cordon" {
 		nodeName := parts[1]
 		if err := t.Ops.CordonNode(context.Background(), nodeName); err == nil {
-			msg := fmt.Sprintf("🚧 Approved: Node `%s` cordoned (marked unschedulable).", nodeName)
-			t.send(chatID, msg)
+			t.send(chatID, fmt.Sprintf("🔒 [Approved] Node `%s` successfully cordoned (marked unschedulable).", nodeName))
 			CrossPlatformSync <- "Telegram User Approved: Cordon Node " + nodeName
+		} else {
+			t.send(chatID, fmt.Sprintf("⚠️ [Error] Could not cordon node `%s`: %v", nodeName, err))
+		}
+	} else if len(parts) == 2 && parts[0] == "uncordon" {
+		nodeName := parts[1]
+		if err := t.Ops.UncordonNode(context.Background(), nodeName); err == nil {
+			t.send(chatID, fmt.Sprintf("🔓 [Approved] Node `%s` uncordoned and actively scheduling.", nodeName))
+			CrossPlatformSync <- "Telegram User Approved: Uncordon Node " + nodeName
+		} else {
+			t.send(chatID, fmt.Sprintf("⚠️ [Error] Could not uncordon node `%s`: %v", nodeName, err))
 		}
 	} else if len(parts) == 4 && parts[0] == "scale" {
 		namespace, deployName, replicas := parts[1], parts[2], parts[3]
 		if err := t.Ops.ScaleDeployment(context.Background(), namespace, deployName, replicas); err == nil {
-			msg := fmt.Sprintf("✅ Executed: Scaled `%s` to %s replica(s) for cost optimization.", deployName, replicas)
-			t.send(chatID, msg)
+			t.send(chatID, fmt.Sprintf("🚀 [Executed] Scaled deployment `%s` to `%s` replica(s).", deployName, replicas))
 			CrossPlatformSync <- "Telegram User Approved: Scale " + deployName + " to " + replicas
 		} else {
-			t.send(chatID, fmt.Sprintf("❌ Failed to scale `%s`: %v", deployName, err))
+			t.send(chatID, fmt.Sprintf("⚠️ [Error] Could not scale deployment `%s`: %v", deployName, err))
+		}
+	} else if len(parts) == 3 && parts[0] == "del_pod" {
+		namespace, podName := parts[1], parts[2]
+		if err := t.Ops.DeletePod(context.Background(), namespace, podName); err == nil {
+			t.send(chatID, fmt.Sprintf("🗑️ [Executed] Forcefully deleted pod `%s`.", podName))
+			CrossPlatformSync <- "Telegram User Approved: Delete Pod " + podName
+		} else {
+			t.send(chatID, fmt.Sprintf("⚠️ [Error] Could not delete pod `%s`: %v", podName, err))
+		}
+	} else if len(parts) == 3 && parts[0] == "restart_dep" {
+		namespace, deployName := parts[1], parts[2]
+		if err := t.Ops.RollbackDeployment(namespace, deployName); err == nil {
+			t.send(chatID, fmt.Sprintf("🔄 [Executed] Triggered rollout restart for deployment `%s`.", deployName))
+			CrossPlatformSync <- "Telegram User Approved: Restart " + deployName
+		} else {
+			t.send(chatID, fmt.Sprintf("⚠️ [Error] Could not trigger restart for deployment `%s`: %v", deployName, err))
 		}
 	}
 
 	callback := tgbotapi.NewCallback(query.ID, "")
-	_ = t.Bot.Request(callback)
+	_, _ = t.Bot.Request(callback)
 }

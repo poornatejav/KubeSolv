@@ -218,10 +218,7 @@ func (r *KubeSolvConfigReconciler) checkActivity(ctx context.Context, pod *corev
 			return
 		}
 	} else if logsPerSec > 10.0 {
-		steps := min(int32(math.Ceil((logsPerSec-10.0)/10.0)), 2)
-		if steps < 1 {
-			steps = 1
-		}
+		steps := max(min(int32(math.Ceil((logsPerSec-10.0)/10.0)), 2), 1)
 
 		if currentReplicas < maxReplicas {
 			desiredReplicas = min(currentReplicas+steps, maxReplicas)
@@ -369,7 +366,7 @@ func (r *KubeSolvConfigReconciler) handleOOM(ctx context.Context, pod *corev1.Po
 	buttonText := fmt.Sprintf("Approve %s Bump", newLimit.String())
 
 	if r.Slack != nil {
-		_ = _ = r.Slack.BroadcastWithAction("Vertical Scaling Required", msg, actionID, buttonText)
+		_ = r.Slack.BroadcastWithAction("Vertical Scaling Required", msg, actionID, buttonText)
 	}
 	if r.Telegram != nil {
 		r.Telegram.BroadcastWithAction("cluster", "Vertical Scaling Required", msg, actionID, buttonText)

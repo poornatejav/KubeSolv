@@ -17,3 +17,15 @@ func (m *OpsManager) CordonNode(ctx context.Context, nodeName string) error {
 	_, err = m.KubeClient.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
 	return err
 }
+
+func (m *OpsManager) UncordonNode(ctx context.Context, nodeName string) error {
+	node, err := m.KubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	node.Spec.Unschedulable = false
+
+	_, err = m.KubeClient.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+	return err
+}
