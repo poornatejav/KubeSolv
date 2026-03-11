@@ -36,3 +36,8 @@ go.work
 
 # Internal agent docs
 AGENTS.md
+
+# Unencrypted Kubernetes secrets (never commit these!)
+# The sealed-secret.yaml is safe to commit (encrypted)
+config/secrets/secret.yaml
+/tmp/my-kubesolv-secret.yaml
