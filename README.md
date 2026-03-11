@@ -1,75 +1,107 @@
-# 🤖 KubeSolv Autonomous AI Operator
+# 🤖 KubeSolv — Autonomous AI SRE Operator
 
-KubeSolv is a next-generation **Autonomous AI Site Reliability Engineer (SRE)** for your Kubernetes clusters. 
+[![CI Pipeline](https://github.com/poornatejav/KubeSolv/actions/workflows/ci.yml/badge.svg)](https://github.com/poornatejav/KubeSolv/actions/workflows/ci.yml)
+[![Release Pipeline](https://github.com/poornatejav/KubeSolv/actions/workflows/release.yml/badge.svg)](https://github.com/poornatejav/KubeSolv/actions/workflows/release.yml)
+[![Go Version](https://img.shields.io/badge/Go-1.24-blue.svg)](https://go.dev/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-Built using the Kubebuilder framework and powered by Google's **Gemini AI**, KubeSolv doesn't just read your cluster state—it actively manages, remediates, and safeguards it. It integrates directly with your team's Slack or Telegram channels, allowing you to troubleshoot production incidents using natural language.
+KubeSolv is a next-generation **Autonomous AI Site Reliability Engineer (SRE)** for Kubernetes clusters.
+
+Built on the Kubebuilder framework and powered by Google's **Gemini AI**, KubeSolv continuously monitors your cluster, performs AI-driven root cause analysis, and autonomously remediates incidents — with human-in-the-loop guardrails via **Slack** and **Telegram**.
+
+> 📘 **For a detailed product overview, architecture, and use cases, see [PRODUCT.md](./PRODUCT.md).**
 
 ---
 
 ## ✨ Key Features
 
-1. **Native ChatOps Integration**: Talk to your cluster over Slack or Telegram. ("Why is the frontend crashing?", "Are there any node pressure warnings?")
-2. **AI Function Calling**: KubeSolv uses native LLM function execution to autonomously fetch health reports, analyze container logs, and pull pod details.
-3. **Automated Remediations (SRE Tools)**:
-   - Scale deployments dynamically
-   - Restart failing rollout sequences
-   - Force-delete stuck pods
-   - Cordon/Uncordon stressed nodes
-4. **Human-in-the-Loop Guardrails 🛡️**: High-privilege operations (like scaling or deleting) are never executed blindly. KubeSolv pauses the agent loop and sends **Interactive Approval Buttons** to your chat. Operations only execute when a human clicks "Approve."
+- **🤖 AI Root Cause Analysis** — Gemini AI analyzes container logs and cluster state to diagnose issues
+- **🔄 Autonomous Remediation** — Rollbacks, scaling, memory patching, network policy enforcement
+- **🛡️ Human-in-the-Loop** — Interactive approval buttons for all privileged operations
+- **💬 ChatOps** — Natural language conversations via Slack and Telegram
+- **📈 Smart Scaling** — Traffic-based horizontal autoscaling using log volume analysis
+- **💰 Cost Optimization** — AI-driven analysis of over-provisioned deployments
+- **🔒 Security Auto-Heal** — Default-deny network policies for unsecured namespaces
 
 ---
 
-## 🚀 Getting Started (Local Testing)
-
-If you want to test KubeSolv locally against your current `~/.kube/config` context:
+## 🚀 Quick Start
 
 ### Prerequisites
-- Go v1.22+
-- Access to a Kubernetes cluster (e.g., Docker Desktop, Minikube, or EKS/GKE)
-- API Keys for Gemini, Slack, and/or Telegram
+- Go 1.24+
+- Kubernetes cluster (Docker Desktop, Minikube, EKS, GKE, etc.)
+- API keys: Gemini AI, Slack (optional), Telegram (optional)
 
-### 1. Export Secrets
-```sh
-export GEMINI_API_KEY="your-gemini-key"
-export TELEGRAM_BOT_TOKEN="your-telegram-bot-token"
-export SLACK_BOT_TOKEN="xoxb-your-slack-bot-token"
-export SLACK_APP_TOKEN="xapp-your-slack-app-token"
-export SLACK_CHANNEL_ID="your-slack-channel"
-```
+### Local Development
+```bash
+# Export API keys
+export GEMINI_API_KEY="your-key"
+export SLACK_BOT_TOKEN="xoxb-your-token"
+export SLACK_APP_TOKEN="xapp-your-token"
+export SLACK_CHANNEL_ID="your-channel"
+export TELEGRAM_BOT_TOKEN="your-telegram-token"
 
-### 2. Run the Operator
-```sh
+# Run the operator
 make run
 ```
-The operator will boot and begin listening to your messaging platforms. Send a message to the bot (e.g., *"What is the health of the default namespace?"*) to watch the AI orchestrate!
+
+### Production Deployment
+```bash
+# Install CRDs and deploy operator
+make install
+make deploy IMG=ghcr.io/your-org/kubesolv:latest
+```
+
+> 📘 See [USER_GUIDE.md](./USER_GUIDE.md) for complete production deployment instructions.
 
 ---
 
-## 🌍 Deploying to Production (In-Cluster)
+## 🧪 Testing
 
-For production environments, KubeSolv is packaged as a standard Kubernetes Operator deployment. Since it connects to external LLMs and Chat APIs, you must securely manage your API keys using Kubernetes `Secrets`.
+```bash
+# Run all unit tests
+go test ./... -race -v
 
-> **For a detailed, non-technical walkthrough on how to securely deploy KubeSolv to production via Kubernetes Manifests, please read the [USER_GUIDE.md](./USER_GUIDE.md).**
+# Run with coverage
+go test ./... -race -coverprofile=cover.out
+go tool cover -func=cover.out
+```
 
 ---
 
-## 🛠️ Development
+## 🏗️ CI/CD Pipeline
 
-**Build the Docker Image:**
-```sh
-make docker-build docker-push IMG=<your-registry>/kubesolv:latest
+| Stage | Description |
+|---|---|
+| **Lint** | golangci-lint v2 with 15+ linters |
+| **Test** | 50+ unit tests with race detection |
+| **Security** | govulncheck + gosec + Trivy container scan |
+| **Build** | Multi-arch Docker images (amd64/arm64) |
+| **SBOM** | Software Bill of Materials via Syft |
+| **Release** | Manual approval gate → promoted to `latest` |
+
+- **`main` branch** → builds `dev-latest` image to GHCR
+- **`release/*` branch** → builds RC image → approval gate → promoted to versioned release
+
+---
+
+## 📁 Project Structure
+
+```
+cmd/main.go                    Operator entrypoint
+api/v1/                        CRD type definitions (KubeSolvConfig)
+internal/
+  controller/                  Reconciler logic (pod + node watchers)
+  ai/                          Gemini AI client (chat, decisions, cost analysis)
+  alert/                       ChatOps (Slack + Telegram bots)
+  ops/                         Cluster operations (scale, restart, cordon, pod mgmt)
+  metrics/                     Prometheus client for CPU/memory metrics
+config/                        Kubernetes manifests (CRDs, RBAC, deployment)
+.github/workflows/             CI/CD pipeline definitions
 ```
 
-**Install CRDs and Deploy:**
-```sh
-make install 
-make deploy IMG=<your-registry>/kubesolv:latest
-```
-
-**Run Unit Tests:**
-```sh
-make test
-```
+---
 
 ## License
+
 Licensed under the Apache License, Version 2.0.
