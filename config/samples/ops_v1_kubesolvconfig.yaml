@@ -1,0 +1,9 @@
+apiVersion: ops.kubesolv.io/v1
+kind: KubeSolvConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: kubesolv
+    app.kubernetes.io/managed-by: kustomize
+  name: kubesolvconfig-sample
+spec:
+  # TODO(user): Add fields here
