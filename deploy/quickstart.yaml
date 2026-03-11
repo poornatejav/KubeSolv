@@ -1,0 +1,189 @@
+# ============================================================
+# KubeSolv Quick Install
+# ============================================================
+# This is a self-contained install manifest. Just fill in your
+# API keys below and run:
+#
+#   kubectl apply -f quickstart.yaml
+#
+# That's it! KubeSolv will start monitoring your cluster.
+#
+# To check the status:
+#   kubectl logs -n kubesolv-system deployment/kubesolv-controller-manager -f
+#
+# To uninstall:
+#   kubectl delete -f quickstart.yaml
+# ============================================================
+
+# ── 1. Namespace ──
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubesolv-system
+  labels:
+    app.kubernetes.io/name: kubesolv
+---
+
+# ── 2. Your API Keys (fill these in!) ──
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubesolv-credentials
+  namespace: kubesolv-system
+type: Opaque
+stringData:
+  # REQUIRED — Get from https://aistudio.google.com/apikey
+  GEMINI_API_KEY: "<YOUR_GEMINI_API_KEY>"
+
+  # OPTIONAL — Slack integration
+  SLACK_BOT_TOKEN: ""     # xoxb-... from Slack API
+  SLACK_APP_TOKEN: ""     # xapp-... from Slack API
+  SLACK_CHANNEL_ID: ""    # Channel ID (right-click channel → View details)
+
+  # OPTIONAL — Telegram integration
+  TELEGRAM_BOT_TOKEN: ""  # From @BotFather
+  TELEGRAM_CHAT_ID: ""    # Your chat/group ID
+
+  # OPTIONAL — Prometheus metrics
+  PROMETHEUS_URL: ""      # e.g., http://prometheus-server.monitoring:9090
+---
+
+# ── 3. Service Account ──
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubesolv-controller-manager
+  namespace: kubesolv-system
+---
+
+# ── 4. RBAC — Cluster-wide read + limited write ──
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubesolv-manager-role
+rules:
+  # Read all pods, events, nodes, deployments, namespaces
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, nodes, namespaces, secrets, services]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list, watch]
+  # Write: scale deployments, patch pods/deployments, manage nodes
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [update, patch]
+  - apiGroups: [apps]
+    resources: [deployments/scale]
+    verbs: [get, update, patch]
+  # Network policies for security auto-heal
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create]
+  # Metrics
+  - apiGroups: [metrics.k8s.io]
+    resources: [pods, nodes]
+    verbs: [get, list]
+  # KubeSolv CRD
+  - apiGroups: [ops.kubesolv.io]
+    resources: [kubesolvconfigs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [ops.kubesolv.io]
+    resources: [kubesolvconfigs/status]
+    verbs: [get, update, patch]
+  - apiGroups: [ops.kubesolv.io]
+    resources: [kubesolvconfigs/finalizers]
+    verbs: [update]
+  # Leader election
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubesolv-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubesolv-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: kubesolv-controller-manager
+    namespace: kubesolv-system
+---
+
+# ── 5. The Operator ──
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesolv-controller-manager
+  namespace: kubesolv-system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: kubesolv
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  template:
+    metadata:
+      labels:
+        control-plane: controller-manager
+        app.kubernetes.io/name: kubesolv
+    spec:
+      serviceAccountName: kubesolv-controller-manager
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: ghcr.io/poornatejav/kubesolv:latest
+          command: ["/manager"]
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+          envFrom:
+            - secretRef:
+                name: kubesolv-credentials
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8081
+              name: health
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 128Mi
+      terminationGracePeriodSeconds: 10
