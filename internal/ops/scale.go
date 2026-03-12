@@ -10,11 +10,11 @@ import (
 )
 
 func (m *OpsManager) ScaleDeployment(ctx context.Context, namespace, name string, replicas string) error {
-	repInt, err := strconv.Atoi(replicas)
+	rep64, err := strconv.ParseInt(replicas, 10, 32)
 	if err != nil {
 		return err
 	}
-	rep32 := int32(repInt)
+	rep32 := int32(rep64)
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		result, err := m.KubeClient.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})

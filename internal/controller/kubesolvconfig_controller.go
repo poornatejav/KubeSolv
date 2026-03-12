@@ -188,12 +188,12 @@ func (r *KubeSolvConfigReconciler) checkActivity(ctx context.Context, pod *corev
 	minReplicas := int32(1)
 	maxReplicas := int32(10)
 	if val, ok := deploy.Annotations["kubesolv.io/min-replicas"]; ok {
-		if v, err := strconv.Atoi(val); err == nil {
+		if v, err := strconv.ParseInt(val, 10, 32); err == nil {
 			minReplicas = int32(v)
 		}
 	}
 	if val, ok := deploy.Annotations["kubesolv.io/max-replicas"]; ok {
-		if v, err := strconv.Atoi(val); err == nil {
+		if v, err := strconv.ParseInt(val, 10, 32); err == nil {
 			maxReplicas = int32(v)
 		}
 	}
