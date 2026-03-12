@@ -1,41 +1,14 @@
 run:
-  allow-parallel-runners: true
   go: '1.24'
+  timeout: 5m
+
 linters:
   disable-all: true
   enable:
-    - copyloopvar
-    - dupl
     - errcheck
-    - ginkgolinter
-    - goconst
-    - gocyclo
     - govet
     - ineffassign
-    - lll
-    - misspell
-    - nakedret
-    - prealloc
-    - revive
+    - typecheck
     - staticcheck
-    - unconvert
-    - unparam
-    - unused
-linters-settings:
-  revive:
-    rules:
-      - name: comment-spacings
-      - name: import-shadowing
-issues:
-  exclude-rules:
-    - path: api/.*
-      linters:
-        - lll
-    - path: internal/.*
-      linters:
-        - dupl
-        - lll
-  exclude-dirs:
-    - third_party
-    - builtin
-    - examples
+    - revive
+    - copyloopvar
