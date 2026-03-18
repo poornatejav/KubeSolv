@@ -1,0 +1,33 @@
+kubesolv:
+  licenseKey: ""
+  image: ghcr.io/yourorg/kubesolv:latest
+  pullPolicy: IfNotPresent
+  namespace: kubesolv
+
+slack:
+  enabled: false
+  botToken: ""
+  appToken: ""
+  channelId: ""
+
+telegram:
+  enabled: false
+  botToken: ""
+  adminChatId: ""
+
+prometheus:
+  url: ""   # auto-discovered if empty
+
+namespaces:
+  ignore:
+    - kube-system
+    - local-path-storage
+    - ingress-nginx
+    - monitoring
+
+ai:
+  endpoint: "https://api.kubesolv.io/v1"
+
+guardrails:
+  maxMemoryLimit: "2Gi"
+  maxReplicas: 20

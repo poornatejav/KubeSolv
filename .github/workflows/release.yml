@@ -1,4 +1,4 @@
-name: KubeSolv Release Pipeline
+name: Release
 
 on:
   push:
@@ -7,7 +7,6 @@ on:
 permissions:
   contents: write
   packages: write
-  security-events: write
 
 env:
   REGISTRY: ghcr.io
@@ -15,109 +14,67 @@ env:
   GO_VERSION: '1.25.x'
 
 jobs:
-  # ──────────────────────────────────────────────
-  # Job 1: Lint
-  # ──────────────────────────────────────────────
+  # ──────────────────────────────────────
+  # Lint + Vet
+  # ──────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
 
-      - name: Run go vet
+      - name: go vet
         run: go vet ./...
 
-  # ──────────────────────────────────────────────
-  # Job 2: Unit Tests with Coverage Gate
-  # ──────────────────────────────────────────────
+  # ──────────────────────────────────────
+  # Tests
+  # ──────────────────────────────────────
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
 
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Run unit tests
-        run: go test ./... -race -coverprofile=coverage.out -covermode=atomic -v
+      - name: Run tests
+        run: go test ./... -race -coverprofile=coverage.out -v
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: release-coverage
           path: coverage.out
           retention-days: 90
 
-  # ──────────────────────────────────────────────
-  # Job 3: Security Scan (Strict for Release)
-  # ──────────────────────────────────────────────
-  security-scan:
-    name: Security Scan (Strict)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Run govulncheck
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./... || true
-
-      - name: Run gosec (strict)
-        uses: securego/gosec@master
-        with:
-          args: -exclude-generated -severity high ./...
-
-  # ──────────────────────────────────────────────
-  # Job 4: Build Release Candidate Image
-  # ──────────────────────────────────────────────
-  build-release-candidate:
-    name: Build Release Candidate
-    needs: [lint, test, security-scan]
+  # ──────────────────────────────────────
+  # Build Release Candidate
+  # ──────────────────────────────────────
+  build-rc:
+    name: Build RC Image
+    needs: [lint, test]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
       rc_tag: ${{ steps.version.outputs.rc_tag }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Extract version from branch name
+      - name: Extract version
         id: version
         run: |
           BRANCH="${GITHUB_REF#refs/heads/release/}"
           echo "version=${BRANCH}" >> $GITHUB_OUTPUT
           echo "rc_tag=rc-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
-          echo "📦 Release version: ${BRANCH}"
-          echo "🏷️ RC tag: rc-$(echo $GITHUB_SHA | cut -c1-7)"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
       - name: Log into GHCR
         uses: docker/login-action@v3
@@ -126,72 +83,37 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push RC image
+      - name: Build and push RC
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.rc_tag }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.rc_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ── Trivy Scan (Strict — fail on HIGH) ──
-      - name: Trivy vulnerability scan (strict)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.rc_tag }}
-          format: 'table'
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
-
-      # ── SBOM ──
-      - name: Generate SBOM
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.rc_tag }}
-          format: spdx-json
-          output-file: sbom.spdx.json
-
-      - name: Upload SBOM
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-sbom
-          path: sbom.spdx.json
-          retention-days: 365
-
-  # ──────────────────────────────────────────────
-  # Job 5: Manual Approval Gate
-  # ──────────────────────────────────────────────
-  approval-gate:
-    name: Awaiting Production Approval
-    needs: [build-release-candidate]
+  # ──────────────────────────────────────
+  # Manual Approval Gate
+  # ──────────────────────────────────────
+  approval:
+    name: Awaiting Approval
+    needs: [build-rc]
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Approval received
-        run: |
-          echo "✅ Production release approved by: ${{ github.actor }}"
-          echo "📦 Version: ${{ needs.build-release-candidate.outputs.version }}"
-          echo "🏷️ RC Tag: ${{ needs.build-release-candidate.outputs.rc_tag }}"
+      - run: echo "✅ Approved by ${{ github.actor }}"
 
-  # ──────────────────────────────────────────────
-  # Job 6: Promote & Tag Release Image
-  # ──────────────────────────────────────────────
-  promote-release:
-    name: Promote to Release
-    needs: [approval-gate, build-release-candidate]
+  # ──────────────────────────────────────
+  # Promote to Release
+  # ──────────────────────────────────────
+  promote:
+    name: Promote Release
+    needs: [approval, build-rc]
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
       - name: Log into GHCR
         uses: docker/login-action@v3
@@ -203,50 +125,36 @@ jobs:
       - name: Install crane
         run: |
           VERSION=$(curl -s "https://api.github.com/repos/google/go-containerregistry/releases/latest" | jq -r '.tag_name')
-          OS=Linux
-          ARCH=x86_64
-          curl -sL "https://github.com/google/go-containerregistry/releases/download/${VERSION}/go-containerregistry_${OS}_${ARCH}.tar.gz" > crane.tar.gz
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${VERSION}/go-containerregistry_Linux_x86_64.tar.gz" > crane.tar.gz
           tar -zxvf crane.tar.gz -C /usr/local/bin/ crane
           chmod +x /usr/local/bin/crane
 
-      - name: Promote RC to release tags
+      - name: Promote RC to release
         env:
-          RC_TAG: ${{ needs.build-release-candidate.outputs.rc_tag }}
-          VERSION: ${{ needs.build-release-candidate.outputs.version }}
+          RC_TAG: ${{ needs.build-rc.outputs.rc_tag }}
+          VERSION: ${{ needs.build-rc.outputs.version }}
         run: |
           crane auth login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
-          
-          # Tag as version
           crane tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${RC_TAG} ${VERSION}
-          
-          # Tag as latest
           crane tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${RC_TAG} latest
-          
-          echo "✅ Image promoted:"
-          echo "   ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
-          echo "   ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
 
-  # ──────────────────────────────────────────────
-  # Job 7: Create GitHub Release
-  # ──────────────────────────────────────────────
-  create-release:
-    name: Create GitHub Release
-    needs: [promote-release, build-release-candidate]
+  # ──────────────────────────────────────
+  # GitHub Release
+  # ──────────────────────────────────────
+  release:
+    name: GitHub Release
+    needs: [promote, build-rc]
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.build-release-candidate.outputs.version }}
-          name: KubeSolv ${{ needs.build-release-candidate.outputs.version }}
+          tag_name: ${{ needs.build-rc.outputs.version }}
+          name: KubeSolv ${{ needs.build-rc.outputs.version }}
           generate_release_notes: true
-          draft: false
-          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

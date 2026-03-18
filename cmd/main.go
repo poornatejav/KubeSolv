@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -134,19 +135,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ── AI Client (Gemini) ──
-	apiKey := getEnv("GEMINI_API_KEY", "")
+	// ── AI Client (Gemini or Proxy) ──
 	var aiClient *ai.Client
-	if apiKey != "" {
-		aiClient, err = ai.NewClient(apiKey)
-		if err != nil {
-			setupLog.Error(err, "Failed to initialize Gemini AI client")
-			aiClient = nil
-		} else {
-			setupLog.Info("✅ Gemini AI client initialized")
-		}
+	licenseKey := getEnv("LICENSE_KEY", "")
+	aiEndpoint := getEnv("AI_ENDPOINT", "")
+
+	if licenseKey != "" && aiEndpoint != "" {
+		// Proxy mode: operator talks to backend, backend talks to Gemini
+		aiClient = ai.NewProxyClient(aiEndpoint, licenseKey)
+		setupLog.Info("✅ AI client initialized in proxy mode", "endpoint", aiEndpoint)
 	} else {
-		setupLog.Info("⚠️  GEMINI_API_KEY not set — AI analysis disabled")
+		// Direct mode: operator talks to Gemini directly with API key
+		apiKey := getEnv("GEMINI_API_KEY", "")
+		if apiKey != "" {
+			aiClient, err = ai.NewClient(apiKey)
+			if err != nil {
+				setupLog.Error(err, "Failed to initialize Gemini AI client")
+				aiClient = nil
+			} else {
+				setupLog.Info("✅ Gemini AI client initialized")
+			}
+		} else {
+			setupLog.Info("⚠️  GEMINI_API_KEY not set — AI analysis disabled")
+		}
 	}
 
 	// ── Kubernetes Clients ──
@@ -170,8 +181,9 @@ func main() {
 		}
 		telegramBot = alert.NewTelegramBot(botToken, telegramChatID, opsManager, aiClient)
 		if telegramBot != nil {
+			telegramBot.SetKubeClient(kubeClient)
 			go telegramBot.Start()
-			setupLog.Info("✅ Telegram bot started", "chatID", telegramChatID)
+			setupLog.Info("✅ Telegram bot started", "adminChatID", telegramChatID)
 		}
 	} else {
 		setupLog.Info("⚠️  TELEGRAM_BOT_TOKEN not set — Telegram integration disabled")
@@ -202,14 +214,19 @@ func main() {
 		setupLog.Info(fmt.Sprintf("⚠️  Slack integration disabled — missing: %s", strings.Join(missing, ", ")))
 	}
 
-	// ── Prometheus Client ──
-	promURL := getEnv("PROMETHEUS_URL", "http://localhost:9090")
-	promClient, err := metrics.NewPrometheusClient(promURL)
-	if err != nil {
-		setupLog.Info("⚠️  Prometheus client failed — cost optimization disabled", "error", err)
-		promClient = nil
+	// ── Prometheus Client (with auto-discovery) ──
+	var promClient *metrics.PrometheusClient
+	promURL := metrics.AutoDiscoverPrometheus(context.Background(), kubeClient)
+	if promURL != "" {
+		promClient, err = metrics.NewPrometheusClient(promURL)
+		if err != nil {
+			setupLog.Info("⚠️  Prometheus client failed — cost optimization disabled", "error", err)
+			promClient = nil
+		} else {
+			setupLog.Info("✅ Prometheus client initialized", "url", promURL)
+		}
 	} else {
-		setupLog.Info("✅ Prometheus client initialized", "url", promURL)
+		setupLog.Info("⚠️  Prometheus not found — cost optimization and CPU-based scaling disabled")
 	}
 
 	// ── Integration Status Summary ──

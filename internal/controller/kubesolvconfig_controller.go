@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,6 +158,11 @@ func (r *KubeSolvConfigReconciler) checkSecurity(ctx context.Context, pod *corev
 }
 
 func (r *KubeSolvConfigReconciler) checkActivity(ctx context.Context, pod *corev1.Pod) {
+	// FIX 2: Use Prometheus CPU metrics instead of log line count
+	if r.Prometheus == nil {
+		return
+	}
+
 	cacheKey := fmt.Sprintf("scale/%s/%s", pod.Namespace, pod.Name)
 	if lastTime, ok := r.AlertCache.Load(cacheKey); ok {
 		if time.Since(lastTime.(time.Time)) < 15*time.Second {
@@ -198,31 +203,26 @@ func (r *KubeSolvConfigReconciler) checkActivity(ctx context.Context, pod *corev
 		}
 	}
 
-	logs, err := r.getRecentLogs(ctx, pod.Name, pod.Namespace)
+	cpuUsage, err := r.Prometheus.GetCPUUsage(ctx, pod.Namespace, pod.Name)
 	if err != nil {
 		return
 	}
 
-	lines := len(strings.Split(logs, "\n"))
-	logsPerSec := float64(lines) / 5.0
 	currentReplicas := *deploy.Spec.Replicas
-
 	var desiredReplicas int32
 	reason := ""
 
-	if logsPerSec < 0.5 {
-		if currentReplicas > minReplicas {
-			desiredReplicas = currentReplicas - 1
-			reason = fmt.Sprintf("📉 Traffic Dropped (%.1f logs/s). Scaling Down.", logsPerSec)
+	if cpuUsage > 0.70 {
+		if currentReplicas < maxReplicas {
+			desiredReplicas = currentReplicas + 1
+			reason = fmt.Sprintf("🔥 High CPU (%.0f%%). Scaling Up.", cpuUsage*100)
 		} else {
 			return
 		}
-	} else if logsPerSec > 10.0 {
-		steps := max(min(int32(math.Ceil((logsPerSec-10.0)/10.0)), 2), 1)
-
-		if currentReplicas < maxReplicas {
-			desiredReplicas = min(currentReplicas+steps, maxReplicas)
-			reason = fmt.Sprintf("🔥 High Load (%.1f logs/s). Scaling Up +%d.", logsPerSec, steps)
+	} else if cpuUsage < 0.20 {
+		if currentReplicas > minReplicas {
+			desiredReplicas = currentReplicas - 1
+			reason = fmt.Sprintf("📉 Low CPU (%.0f%%). Scaling Down.", cpuUsage*100)
 		} else {
 			return
 		}
@@ -233,8 +233,8 @@ func (r *KubeSolvConfigReconciler) checkActivity(ctx context.Context, pod *corev
 	if desiredReplicas != currentReplicas {
 		patch := fmt.Appendf(nil, `{"spec": {"replicas": %d}}`, desiredReplicas)
 		if err := r.Patch(ctx, &deploy, client.RawPatch(types.MergePatchType, patch)); err == nil {
-			msg := fmt.Sprintf("📦 *App:* `%s`\n📊 *Traffic:* %.1f logs/sec\n🔄 *Adjustment:* %d ➡ %d\n📝 *Reason:* %s",
-				deploy.Name, logsPerSec, currentReplicas, desiredReplicas, reason)
+			msg := fmt.Sprintf("📦 *App:* `%s`\n📊 *CPU:* %.0f%%\n🔄 *Adjustment:* %d ➡ %d\n📝 *Reason:* %s",
+				deploy.Name, cpuUsage*100, currentReplicas, desiredReplicas, reason)
 			r.notifyUser("Smart Scaling Triggered", msg)
 		}
 	}
@@ -347,9 +347,44 @@ func (r *KubeSolvConfigReconciler) handleOOM(ctx context.Context, pod *corev1.Po
 		return
 	}
 
+	// FIX 6: OOM pending cooldown — don't send another button if one is already pending
+	pendingKey := fmt.Sprintf("oom_pending/%s/%s", pod.Namespace, deploy.Name)
+	if lastTime, ok := r.AlertCache.Load(pendingKey); ok {
+		if time.Since(lastTime.(time.Time)) < 10*time.Minute {
+			ctrl.Log.WithName("kubesolv").Info("OOM bump already pending, skipping", "deployment", deploy.Name)
+			return
+		}
+	}
+
+	// FIX 8: Find the container that actually OOM'd
+	containerName := ""
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.LastTerminationState.Terminated != nil && cs.LastTerminationState.Terminated.Reason == "OOMKilled" {
+			containerName = cs.Name
+			break
+		}
+	}
+
+	// Find matching container in deployment spec
+	containerIdx := -1
+	if containerName != "" {
+		for i, c := range deploy.Spec.Template.Spec.Containers {
+			if c.Name == containerName {
+				containerIdx = i
+				break
+			}
+		}
+	}
+	if containerIdx == -1 {
+		if containerName != "" {
+			ctrl.Log.WithName("kubesolv").Info("OOMKilled container not found in deploy spec, falling back to index 0", "container", containerName)
+		}
+		containerIdx = 0
+		containerName = deploy.Spec.Template.Spec.Containers[0].Name
+	}
+
 	newLimit := resource.MustParse("128Mi")
-	containerName := deploy.Spec.Template.Spec.Containers[0].Name
-	currentLimit := deploy.Spec.Template.Spec.Containers[0].Resources.Limits.Memory()
+	currentLimit := deploy.Spec.Template.Spec.Containers[containerIdx].Resources.Limits.Memory()
 	if !currentLimit.IsZero() {
 		newLimit = *currentLimit
 		newLimit.Add(*currentLimit)
@@ -361,7 +396,10 @@ func (r *KubeSolvConfigReconciler) handleOOM(ctx context.Context, pod *corev1.Po
 		return
 	}
 
-	msg := fmt.Sprintf("Pod %s ran out of memory. Current limit is insufficient.", pod.Name)
+	// Store pending key so we don't re-send while button is live
+	r.AlertCache.Store(pendingKey, time.Now())
+
+	msg := fmt.Sprintf("Pod %s (container: %s) ran out of memory. Current limit is insufficient.", pod.Name, containerName)
 	actionID := fmt.Sprintf("patch_mem|%s|%s|%s|%s", pod.Namespace, deploy.Name, containerName, newLimit.String())
 	buttonText := fmt.Sprintf("Approve %s Bump", newLimit.String())
 
@@ -470,18 +508,30 @@ func (r *KubeSolvConfigReconciler) rollbackDeployment(ctx context.Context, names
 		return fmt.Errorf("not enough history to rollback")
 	}
 
+	// FIX 4: Sort ReplicaSets by revision annotation as integer
+	currentRevStr := deploy.Annotations["deployment.kubernetes.io/revision"]
+	currentRev, _ := strconv.ParseInt(currentRevStr, 10, 64)
+	targetRev := currentRev - 1
+
+	// Sort by revision descending for deterministic selection
+	sort.Slice(rsList.Items, func(i, j int) bool {
+		ri, _ := strconv.ParseInt(rsList.Items[i].Annotations["deployment.kubernetes.io/revision"], 10, 64)
+		rj, _ := strconv.ParseInt(rsList.Items[j].Annotations["deployment.kubernetes.io/revision"], 10, 64)
+		return ri > rj
+	})
+
 	var prevRS *appsv1.ReplicaSet
 	for i := range rsList.Items {
 		rs := &rsList.Items[i]
-		if rs.Annotations["deployment.kubernetes.io/revision"] != deploy.Annotations["deployment.kubernetes.io/revision"] {
-			if prevRS == nil || rs.CreationTimestamp.After(prevRS.CreationTimestamp.Time) {
-				prevRS = rs
-			}
+		rev, _ := strconv.ParseInt(rs.Annotations["deployment.kubernetes.io/revision"], 10, 64)
+		if rev == targetRev {
+			prevRS = rs
+			break
 		}
 	}
 
 	if prevRS == nil {
-		return fmt.Errorf("previous replica set not found")
+		return fmt.Errorf("previous revision not found, rollback aborted")
 	}
 
 	// Create a deep copy of the template so we can modify it safely

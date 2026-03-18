@@ -1,18 +1,30 @@
 package ai
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 type Client struct {
 	APIKey   string
 	genModel *genai.GenerativeModel
 	aiClient *genai.Client
+
+	// Proxy mode fields
+	proxyEndpoint string
+	licenseKey    string
+	httpClient    *http.Client
+	isProxy       bool
 }
 
 type sessionEntry struct {
@@ -24,6 +36,7 @@ var (
 	chatSessions = make(map[string]*sessionEntry)
 	sessionMutex sync.Mutex
 	sessionTTL   = 30 * time.Minute
+	aiLog        = ctrl.Log.WithName("ai")
 )
 
 func NewClient(apiKey string) (*Client, error) {
@@ -94,7 +107,7 @@ func NewClient(apiKey string) (*Client, error) {
 				},
 				{
 					Name:        "get_pod_details",
-					Description: "Gets detailed information about a pod including its status, IP, node, and condition. Use this before trying to delete a pod or read logs to understand its context.",
+					Description: "Gets detailed information about a pod including its status, IP, node, and condition.",
 					Parameters: &genai.Schema{
 						Type: genai.TypeObject,
 						Properties: map[string]*genai.Schema{
@@ -112,7 +125,7 @@ func NewClient(apiKey string) (*Client, error) {
 				},
 				{
 					Name:        "delete_pod",
-					Description: "Force deletes a pod to cause it to reschedule or restart. Useful if a pod is stuck.",
+					Description: "Force deletes a pod to cause it to reschedule or restart.",
 					Parameters: &genai.Schema{
 						Type: genai.TypeObject,
 						Properties: map[string]*genai.Schema{
@@ -148,7 +161,7 @@ func NewClient(apiKey string) (*Client, error) {
 				},
 				{
 					Name:        "list_pods",
-					Description: "Lists all pods in a specified namespace. Use this when you need to find a pod name.",
+					Description: "Lists all pods in a specified namespace.",
 					Parameters: &genai.Schema{
 						Type: genai.TypeObject,
 						Properties: map[string]*genai.Schema{
@@ -198,10 +211,51 @@ func NewClient(apiKey string) (*Client, error) {
 		aiClient: client,
 	}
 
-	// Start background session reaper to prevent memory leaks
 	go c.startSessionReaper()
 
 	return c, nil
+}
+
+// NewProxyClient creates a client that proxies AI requests through the KubeSolv backend.
+// The backend holds the real GEMINI_API_KEY so customers never need one.
+func NewProxyClient(endpoint, licenseKey string) *Client {
+	return &Client{
+		proxyEndpoint: endpoint,
+		licenseKey:    licenseKey,
+		httpClient:    &http.Client{Timeout: 60 * time.Second},
+		isProxy:       true,
+	}
+}
+
+// proxyRequest sends a JSON request to the proxy backend
+func (c *Client) proxyRequest(ctx context.Context, path string, body any) ([]byte, error) {
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.proxyEndpoint+path, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.licenseKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("proxy returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	return respBody, nil
 }
 
 // GetOrCreateSession manages conversation history per chat ID with TTL tracking
@@ -223,7 +277,6 @@ func (c *Client) GetOrCreateSession(chatID string) *genai.ChatSession {
 }
 
 // GenerateStateless performs a one-shot generation without session history.
-// Use this for analysis tasks where conversational context would contaminate results.
 func (c *Client) GenerateStateless(ctx context.Context, prompt string) (*genai.GenerateContentResponse, error) {
 	return c.genModel.GenerateContent(ctx, genai.Text(prompt))
 }

@@ -3,9 +3,9 @@ package alert
 import "testing"
 
 func TestCrossPlatformSync_Buffered(t *testing.T) {
-	// CrossPlatformSync is a buffered channel of size 50
-	if cap(CrossPlatformSync) != 50 {
-		t.Errorf("expected buffer size 50, got: %d", cap(CrossPlatformSync))
+	// CrossPlatformSync is a buffered channel of size 100
+	if cap(CrossPlatformSync) != 100 {
+		t.Errorf("expected buffer size 100, got: %d", cap(CrossPlatformSync))
 	}
 }
 

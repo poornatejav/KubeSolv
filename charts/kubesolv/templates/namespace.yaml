@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "kubesolv.namespace" . }}
+  labels:
+    {{- include "kubesolv.labels" . | nindent 4 }}

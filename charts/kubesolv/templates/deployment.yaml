@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesolv
+  namespace: {{ include "kubesolv.namespace" . }}
+  labels:
+    {{- include "kubesolv.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "kubesolv.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubesolv.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: kubesolv
+      containers:
+      - name: manager
+        image: {{ .Values.kubesolv.image }}
+        imagePullPolicy: {{ .Values.kubesolv.pullPolicy }}
+        args:
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        envFrom:
+        - secretRef:
+            name: kubesolv-secrets
+        - configMapRef:
+            name: kubesolv-config
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+      terminationGracePeriodSeconds: 10
