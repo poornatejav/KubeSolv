@@ -1,15 +1,13 @@
-# KubeSolv Code Owners
-# These owners will be requested for review on PRs
-
-# Default owner for everything
+# Global owners — review required for all changes
 * @poornatejav
 
-# CI/CD pipeline changes require extra review
-.github/ @poornatejav
+# Core operator logic
+/internal/controller/ @poornatejav
+/internal/ai/ @poornatejav
+/internal/alert/ @poornatejav
+/internal/ops/ @poornatejav
 
-# API changes (CRD types) require careful review
-api/ @poornatejav
-
-# Security-sensitive files
-config/rbac/ @poornatejav
-config/network-policy/ @poornatejav
+# Infrastructure
+/charts/ @poornatejav
+/.github/ @poornatejav
+/Dockerfile @poornatejav
